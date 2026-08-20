@@ -1,6 +1,7 @@
 import { router, publicProcedure } from './trpc.js'
 import { authRouter } from './auth/router.js'
 import { cardRouter } from './search/router.js'
+import { deckRouter } from './deck/router.js'
 
 export const appRouter = router({
   health: publicProcedure.query(() => ({
@@ -9,6 +10,7 @@ export const appRouter = router({
   })),
   auth: authRouter,
   card: cardRouter,
+  deck: deckRouter,
 })
 
 export type AppRouter = typeof appRouter

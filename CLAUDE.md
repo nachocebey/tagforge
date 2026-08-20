@@ -101,6 +101,18 @@ Verified end-to-end against a real local Postgres (see "Local Postgres" below) a
 - The singleton-rule exclusion (`excludeOracleIds`) always lets the 6 basic lands through regardless, matched by name via `BASIC_LAND_NAMES` in `basic-lands.ts` (not hardcoded oracle_ids — more robust, self-documenting, doesn't depend on which oracle_id got queried at write-time).
 - `tag:<slug>` resolves the tag and walks `child_ids` recursively (tags only store direct taggings; matching a parent category like "removal" means unioning every descendant tag's taggings), then filters via `taggings.some`.
 - Verified against the real ingested DB (31,913 cards): text/name search, `t:`+`is:commander` combo, color-identity constraint (Simic search returned only U/G cards), `cmc<=` comparator, `tag:grave-pact`, negation, unknown-tag (0 results, not an error), and the basic-land exclusion exception.
+- Testing `is:commander` surfaced a real bug in the ingestion's `canBeCommander` flag: the regex required the literal substring `Legendary Creature`, which misses `Legendary Artifact Creature`, `Legendary Enchantment Creature`, etc. — 183 real commander-eligible cards (Silas Renn, Seeker Adept among them) were wrongly excluded. Fixed in `apps/backend/src/ingest/transform.ts` by checking `typeLine.includes('Legendary') && typeLine.includes('Creature')` instead of requiring adjacency (checked live data first for any double-faced card where the two words land on mismatched faces — none), then re-ran the ingestion to correct the already-populated DB.
+
+## Deck API
+
+`apps/backend/src/deck/` (`structure.ts` — the `DeckStructure` zod schema persisted verbatim in `Deck.structure`; `commander-pairing.ts` — pure `validateCommanderPair` logic for Partner/Partner-with/Choose-a-Background; `router.ts` — the `deck.*` protected tRPC procedures: `create`, `list`, `get`, `update`, `remove`).
+
+- All procedures are `protectedProcedure` (require login) and check `deck.userId === ctx.user.id`; a deck that exists but isn't yours returns the same `NOT_FOUND` as one that doesn't exist, so ids can't be probed.
+- `create`/`update` (when `commanderOracleIds` changes) validate the commander pairing server-side, not just in the UI — fetches both cards and requires one of: both have plain `Partner`, one names the other via `Partner with <name>`, or one `choosesBackground` and the other `isBackground`. The second slot does NOT need `canBeCommander` itself (Background cards aren't commander-eligible on their own — they only work as the second slot).
+- `get`/`create` resolve and embed the full commander `Card` objects in the response (`commanders: Card[]`) so the frontend has everything needed to render the compact commander view and compute the deck's color identity (union of both commanders') without another round trip.
+- `update` accepts any subset of `name`/`commanderOracleIds`/`structure` — built for the debounced autosave described in the brief, not a full-replace PUT.
+- Soft cap of 50 decks per user (`create` throws past that), per the brief's "generous cap if simpler" allowance.
+- Verified end-to-end against the real DB: valid generic-Partner pair (Thrasios + Silas Renn), invalid pair rejected with a clear message (Thrasios + Atraxa, which has no partner ability), valid Background pair (Halsin + Dungeon Delver), list/get/update(autosave)/remove, cross-user ownership boundary (`NOT_FOUND`, not leaked), and unauthenticated access rejected.
 
 ### Auth implementation
 
