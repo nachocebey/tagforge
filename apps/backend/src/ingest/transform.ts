@@ -35,8 +35,15 @@ function effectiveImageUris(card: ScryfallCard): Record<string, string> | null {
 // against live data. The negation check must win over the type-line rule.
 const CANT_BE_COMMANDER = /can'?t be your commander|cannot be your commander/i
 const CAN_BE_COMMANDER = /\bcan be your commander\b/i
-const LEGENDARY_CREATURE = /Legendary Creature/
 const BACKGROUND_TYPE = /\bBackground\b/
+
+// Not just /Legendary Creature/: type_line can be "Legendary Artifact
+// Creature", "Legendary Enchantment Creature — God", etc. — the two words
+// aren't always adjacent. Checked against live data for any double-faced
+// card where "Legendary" and "Creature" land on mismatched faces (none).
+function isLegendaryCreature(typeLine: string): boolean {
+  return typeLine.includes('Legendary') && typeLine.includes('Creature')
+}
 const PARTNER_LINE = /(^|\n)Partner(?!\s+with)\b/
 const PARTNER_WITH = /(^|\n)Partner with ([^(\n]+)/
 const CHOOSE_A_BACKGROUND = /Choose a Background/
@@ -52,7 +59,7 @@ interface CommanderFlags {
 function deriveCommanderFlags(typeLine: string, oracleText: string): CommanderFlags {
   const cantBeCommander = CANT_BE_COMMANDER.test(oracleText)
   const canBeCommander =
-    !cantBeCommander && (LEGENDARY_CREATURE.test(typeLine) || CAN_BE_COMMANDER.test(oracleText))
+    !cantBeCommander && (isLegendaryCreature(typeLine) || CAN_BE_COMMANDER.test(oracleText))
   const partnerWithMatch = oracleText.match(PARTNER_WITH)
 
   return {
