@@ -5,6 +5,23 @@ import { parseSearchQuery } from './query-parser.js'
 import { buildCardSearchWhere } from './build-where.js'
 
 const COLOR_LETTER = z.enum(['W', 'U', 'B', 'R', 'G'])
+const SORT = z.enum(['name', 'cmc', 'price', 'released'])
+
+// Shared by search results and the deck-block hydration below, since the
+// brief's "global sort" selector (mana cost / price / release date) applies
+// to cards inside every block at once, not just to search results.
+function resolveOrderBy(sort: z.infer<typeof SORT>): Prisma.CardOrderByWithRelationInput[] {
+  switch (sort) {
+    case 'cmc':
+      return [{ cmc: 'asc' }, { name: 'asc' }]
+    case 'price':
+      return [{ priceUsd: 'asc' }, { name: 'asc' }]
+    case 'released':
+      return [{ releasedAt: 'desc' }, { name: 'asc' }]
+    default:
+      return [{ name: 'asc' }]
+  }
+}
 
 export const cardRouter = router({
   // Powers both the commander picker (query starts with "is:commander" and
@@ -16,7 +33,7 @@ export const cardRouter = router({
         query: z.string().max(500).default(''),
         commanderColorIdentity: z.array(COLOR_LETTER).optional(),
         excludeOracleIds: z.array(z.string()).max(500).default([]),
-        sort: z.enum(['name', 'cmc', 'price', 'released']).default('name'),
+        sort: SORT.default('name'),
         limit: z.number().int().min(1).max(100).default(50),
       }),
     )
@@ -27,15 +44,20 @@ export const cardRouter = router({
         excludeOracleIds: input.excludeOracleIds,
       })
 
-      const orderBy: Prisma.CardOrderByWithRelationInput[] =
-        input.sort === 'cmc'
-          ? [{ cmc: 'asc' }, { name: 'asc' }]
-          : input.sort === 'price'
-            ? [{ priceUsd: 'asc' }, { name: 'asc' }]
-            : input.sort === 'released'
-              ? [{ releasedAt: 'desc' }, { name: 'asc' }]
-              : [{ name: 'asc' }]
+      return ctx.prisma.card.findMany({ where, orderBy: resolveOrderBy(input.sort), take: input.limit })
+    }),
 
-      return ctx.prisma.card.findMany({ where, orderBy, take: input.limit })
+  // Resolves the full Card rows for a deck's block contents. deck.get only
+  // returns oracle_ids in `structure` (and the resolved commander cards) —
+  // this hydrates everything else the UI needs to render mana cost, name,
+  // and price per card row.
+  byOracleIds: publicProcedure
+    .input(z.object({ oracleIds: z.array(z.string()).max(500), sort: SORT.default('name') }))
+    .query(({ ctx, input }) => {
+      if (input.oracleIds.length === 0) return []
+      return ctx.prisma.card.findMany({
+        where: { oracleId: { in: input.oracleIds } },
+        orderBy: resolveOrderBy(input.sort),
+      })
     }),
 })
