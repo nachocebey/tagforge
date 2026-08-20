@@ -91,6 +91,16 @@ Verified end-to-end against a real local Postgres (see "Local Postgres" below) a
 - Autosave with debounce (1-2s after last action, not per-event).
 - A deck is persisted as its **full block structure** (block name, order, cards per block) in one JSONB column — not a flat card list with a block-id column. This lets a deck reload exactly as it was left, with no reconstruction logic.
 
+### Auth implementation
+
+`apps/backend/src/auth/` (`password.ts`, `session.ts`, `rate-limit.ts`, `router.ts` — the `auth.*` tRPC procedures: `register`, `login`, `logout`, `me`). Verified end-to-end against the real local Postgres with curl: register, duplicate-email conflict, wrong-password rejection, correct login, logout, and rate-limit cutoff after 10 attempts in 15 minutes.
+
+- Sessions are httpOnly cookies (`session_id`) pointing at a `Session` row, not JWTs — `protectedProcedure` in `src/trpc.ts` reads `ctx.user` (populated in `src/context.ts` from the cookie) and throws `UNAUTHORIZED` if absent.
+- `verifyPassword` always runs a bcrypt compare (against a fixed dummy hash when no user exists) so a login attempt against an unregistered email takes the same time as a real one — otherwise timing leaks which emails are registered.
+- CORS is locked to `FRONTEND_URL` (not `origin: true`) with `credentials: true`, since reflecting any origin would let another site ride a logged-in user's cookies.
+- The login rate limiter is in-memory, keyed by `ip:email`, 10 attempts / 15 min — fine for a single-instance MVP, resets on restart, not distributed. It counts successful logins toward the same limit (simplest correct behavior; nobody logs in 10x in 15 min normally).
+- **Fastify plugin decorators need an explicit type import wherever they're used**: `@fastify/cookie` adds `req.cookies`/`res.setCookie` via module augmentation, which only applies within a TypeScript program that includes the plugin's import. `apps/frontend/src/lib/trpc.ts` imports `AppRouter`'s *type* through a deep relative path into the backend, which pulls in `context.ts`/`auth/router.ts` for a separate compilation that never imports `@fastify/cookie` itself — that build silently lost the augmentation and failed to typecheck. Fixed with a side-effect `import type {} from '@fastify/cookie'` in both files; same pattern applies to any future Fastify plugin decorator used outside `index.ts`.
+
 ## Claude Code permissions for this project
 
 `.claude/settings.json` auto-allows: reading/creating/editing repo files, dev server, tests, linter, build, project scripts (including the bulk-data ingestion script), and `git add`/`commit`/`diff`/`status`/`log`.
