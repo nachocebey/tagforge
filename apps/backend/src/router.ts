@@ -1,5 +1,6 @@
 import { router, publicProcedure } from './trpc.js'
 import { authRouter } from './auth/router.js'
+import { cardRouter } from './search/router.js'
 
 export const appRouter = router({
   health: publicProcedure.query(() => ({
@@ -7,6 +8,7 @@ export const appRouter = router({
     timestamp: new Date().toISOString(),
   })),
   auth: authRouter,
+  card: cardRouter,
 })
 
 export type AppRouter = typeof appRouter

@@ -91,6 +91,17 @@ Verified end-to-end against a real local Postgres (see "Local Postgres" below) a
 - Autosave with debounce (1-2s after last action, not per-event).
 - A deck is persisted as its **full block structure** (block name, order, cards per block) in one JSONB column — not a flat card list with a block-id column. This lets a deck reload exactly as it was left, with no reconstruction logic.
 
+## Card search API
+
+`apps/backend/src/search/` (`query-parser.ts` tokenizes a Scryfall-like query string, `build-where.ts` turns the parsed clauses into a Prisma `Card` where-clause, `router.ts` exposes the `card.search` public tRPC procedure). Powers both the commander picker (`query: "is:commander ..."`, no `commanderColorIdentity`) and the per-block card search (`commanderColorIdentity` set, `excludeOracleIds` = current deck contents).
+
+- Supported syntax is a **practical subset**, not the full Scryfall grammar: bare text / `"quoted phrases"` (name-only — see below), negation via a leading `-`, and `t:`/`type:`, `o:`/`oracle:`, `c:`/`color:`, `id:`/`identity:`, `cmc:`/`mv:` (with `=`,`!=`,`>`,`>=`,`<`,`<=`), `tag:`, `is:commander|background|partner`. No parentheses/OR grouping.
+- Bare/quoted text matches **name only**, not oracle text — verified by testing `plains` live: matching name-or-oracle-text buried the actual card "Plains" under ~50 unrelated cards whose rules text just happens to mention "plains" (fetch effects, land-type-matters cards). Rules-text search is `o:`/`oracle:` explicitly. Multiple bare words are joined into one phrase (`sol ring` looks for that substring, not `contains("sol") AND contains("ring")`, which also matched unrelated words like "during"/"spring").
+- `commanderColorIdentity` is `undefined` (no constraint — commander picker) vs `[]` (constraint to colorless cards — a real colorless commander is chosen). Passing `[]` as the "no constraint" default would have wrongly restricted the commander picker to colorless-only results; this was caught before shipping, not after.
+- The singleton-rule exclusion (`excludeOracleIds`) always lets the 6 basic lands through regardless, matched by name via `BASIC_LAND_NAMES` in `basic-lands.ts` (not hardcoded oracle_ids — more robust, self-documenting, doesn't depend on which oracle_id got queried at write-time).
+- `tag:<slug>` resolves the tag and walks `child_ids` recursively (tags only store direct taggings; matching a parent category like "removal" means unioning every descendant tag's taggings), then filters via `taggings.some`.
+- Verified against the real ingested DB (31,913 cards): text/name search, `t:`+`is:commander` combo, color-identity constraint (Simic search returned only U/G cards), `cmc<=` comparator, `tag:grave-pact`, negation, unknown-tag (0 results, not an error), and the basic-land exclusion exception.
+
 ### Auth implementation
 
 `apps/backend/src/auth/` (`password.ts`, `session.ts`, `rate-limit.ts`, `router.ts` — the `auth.*` tRPC procedures: `register`, `login`, `logout`, `me`). Verified end-to-end against the real local Postgres with curl: register, duplicate-email conflict, wrong-password rejection, correct login, logout, and rate-limit cutoff after 10 attempts in 15 minutes.
