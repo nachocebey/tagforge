@@ -1,0 +1,115 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  decks        Deck[]
+  sessions     Session[]
+}
+
+// Server-side session record so login can be revoked (logout, "sign out
+// everywhere") without needing JWT rotation. The session id is what gets
+// set in the client's cookie.
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// The full block structure (block name, order, cards per block) lives in
+// `structure` as JSONB so a deck reloads exactly as it was left.
+model Deck {
+  id                  String   @id @default(uuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id])
+  name                String
+  commanderOracleIds  String[]
+  structure           Json
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([userId, updatedAt])
+}
+
+// Cached from Scryfall's oracle_cards bulk file, refreshed by the daily
+// ingestion job. Keyed by oracle_id so double-faced cards stay one row.
+//
+// canBeCommander / isBackground / hasPartner / choosesBackground /
+// partnerWith are derived once at ingestion time (from type_line and
+// oracle_text) so the commander-picker query doesn't need to parse card
+// text on every request.
+model Card {
+  oracleId          String    @id
+  name              String
+  manaCost          String?
+  cmc               Float
+  typeLine          String
+  oracleText        String?
+  colors            String[]
+  colorIdentity     String[]
+  layout            String
+  releasedAt        DateTime
+  imageUris         Json?
+  cardFaces         Json?
+  legalities        Json
+  prices            Json?
+  priceUsd          Decimal?  @db.Decimal(10, 2)
+  canBeCommander    Boolean   @default(false)
+  isBackground      Boolean   @default(false)
+  hasPartner        Boolean   @default(false)
+  partnerWith       String?
+  choosesBackground Boolean   @default(false)
+  updatedAt         DateTime  @updatedAt
+  taggings          Tagging[]
+
+  @@index([name])
+  @@index([cmc])
+  @@index([releasedAt])
+  @@index([priceUsd])
+  @@index([canBeCommander])
+  @@index([colorIdentity], type: Gin)
+}
+
+// Cached from Scryfall's oracle_tags bulk file. Keyed by the tag's stable
+// UUID (never slug/label, which can change). parentIds/childIds mirror the
+// Tagger hierarchy so a parent category can be resolved by walking children.
+model Tag {
+  id          String    @id
+  slug        String
+  label       String
+  type        String
+  description String?
+  parentIds   String[]
+  childIds    String[]
+  taggings    Tagging[]
+
+  @@index([slug])
+}
+
+// weight is a category from Scryfall ("median", "strong", "very_strong", ...),
+// not a number — stored verbatim rather than mapped to an invented int scale.
+model Tagging {
+  id     String  @id @default(uuid())
+  tagId  String
+  cardId String
+  weight String?
+
+  tag  Tag  @relation(fields: [tagId], references: [id])
+  card Card @relation(fields: [cardId], references: [oracleId])
+
+  @@unique([tagId, cardId])
+  @@index([cardId])
+}

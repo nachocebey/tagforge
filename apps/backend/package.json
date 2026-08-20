@@ -1,0 +1,33 @@
+{
+  "name": "@commander-deck-builder/backend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -b",
+    "start": "node dist/index.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "ingest": "tsx scripts/ingest.ts"
+  },
+  "dependencies": {
+    "fastify": "^5.12.1",
+    "@fastify/cors": "^10.0.1",
+    "@trpc/server": "^11.0.0",
+    "zod": "^3.23.8",
+    "@prisma/client": "^7.0.0",
+    "@prisma/adapter-pg": "^7.0.0",
+    "pg": "^8.13.1",
+    "bcrypt": "^6.0.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "tsx": "^4.16.5",
+    "prisma": "^7.0.0",
+    "@types/node": "^20.14.15",
+    "@types/bcrypt": "^5.0.2",
+    "@types/pg": "^8.11.10"
+  }
+}
