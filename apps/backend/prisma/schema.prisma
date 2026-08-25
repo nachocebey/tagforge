@@ -7,13 +7,14 @@ datasource db {
 }
 
 model User {
-  id           String    @id @default(uuid())
-  email        String    @unique
+  id           String      @id @default(uuid())
+  email        String      @unique
   passwordHash String
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
   decks        Deck[]
   sessions     Session[]
+  ownedCards   OwnedCard[]
 }
 
 // Server-side session record so login can be revoked (logout, "sign out
@@ -42,6 +43,19 @@ model Deck {
   updatedAt           DateTime @updatedAt
 
   @@index([userId, updatedAt])
+}
+
+// A player-level "I already have this physically" flag — deliberately not
+// a full collection system (no quantities, no printings/versions, just
+// owned-or-not per oracle_id, shared across all of a user's decks).
+model OwnedCard {
+  userId    String
+  oracleId  String
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@id([userId, oracleId])
+  @@index([userId])
 }
 
 // Cached from Scryfall's oracle_cards bulk file, refreshed by the daily

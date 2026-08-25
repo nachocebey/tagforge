@@ -1,21 +1,23 @@
-import { trpc } from './lib/trpc'
+import { Routes, Route } from 'react-router-dom'
+import Layout from './components/Layout'
+import LandingPage from './pages/LandingPage'
+import LoginPage from './pages/LoginPage'
+import RegisterPage from './pages/RegisterPage'
+import ProfilePage from './pages/ProfilePage'
+import DecksPage from './pages/DecksPage'
+import DeckBuildPage from './pages/DeckBuildPage'
 
 export default function App() {
-  const health = trpc.health.useQuery()
-
   return (
-    <div className="min-h-screen flex flex-col bg-neutral-950 text-neutral-100">
-      <main className="flex-1 flex items-center justify-center">
-        <div className="text-center space-y-2">
-          <h1 className="text-2xl font-semibold">Commander Deck Builder</h1>
-          <p className="text-neutral-400">
-            Backend status: {health.isLoading ? 'checking...' : (health.data?.status ?? 'unreachable')}
-          </p>
-        </div>
-      </main>
-      <footer className="text-center text-xs text-neutral-500 py-4">
-        Card data and images provided by Scryfall
-      </footer>
-    </div>
+    <Layout>
+      <Routes>
+        <Route path="/" element={<LandingPage />} />
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/register" element={<RegisterPage />} />
+        <Route path="/profile" element={<ProfilePage />} />
+        <Route path="/decks" element={<DecksPage />} />
+        <Route path="/decks/:deckId" element={<DeckBuildPage />} />
+      </Routes>
+    </Layout>
   )
 }

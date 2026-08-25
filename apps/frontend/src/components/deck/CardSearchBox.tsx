@@ -1,0 +1,349 @@
+import { useMemo, useState } from 'react'
+import { trpc } from '../../lib/trpc'
+import { useDebouncedValue } from '../../lib/use-debounced-value'
+import type { CardResult } from '../../lib/trpc-types'
+import { COLOR_DOT, type ColorLetter } from '../../lib/colors'
+import ManaCost from './ManaCost'
+import { CloseIcon } from './icons'
+
+interface CardSearchBoxProps {
+  commanderColorIdentity: ColorLetter[]
+  excludeOracleIds: string[]
+  onSelect: (card: CardResult) => void
+  onClose: () => void
+}
+
+type SortField = 'name' | 'cmc' | 'color' | 'price' | 'released'
+type SortDirection = 'asc' | 'desc'
+
+const SORT_OPTIONS: { value: SortField; label: string }[] = [
+  { value: 'name', label: 'Name' },
+  { value: 'cmc', label: 'Mana cost' },
+  { value: 'color', label: 'Color' },
+  { value: 'released', label: 'Release date' },
+  { value: 'price', label: 'Price' },
+]
+
+const TYPE_OPTIONS = ['Creature', 'Instant', 'Sorcery', 'Artifact', 'Enchantment', 'Planeswalker', 'Battle', 'Land']
+
+type LegendaryFilter = 'any' | 'legendary' | 'non-legendary'
+const LEGENDARY_OPTIONS: { value: LegendaryFilter; label: string }[] = [
+  { value: 'any', label: 'Legendary: any' },
+  { value: 'legendary', label: 'Legendary only' },
+  { value: 'non-legendary', label: 'Non-legendary only' },
+]
+
+// No single sortable scalar backs "color" (it's a WUBRG array) — the panel
+// re-sorts its own (capped) result page client-side instead of asking the
+// server to order by it.
+const WUBRG: ColorLetter[] = ['W', 'U', 'B', 'R', 'G']
+function colorRank(card: CardResult): number {
+  if (card.colors.length === 0) return 0
+  if (card.colors.length > 1) return 6
+  return WUBRG.indexOf(card.colors[0] as ColorLetter) + 1
+}
+function sortByColor(cards: CardResult[], direction: SortDirection): CardResult[] {
+  const sorted = [...cards].sort((a, b) => colorRank(a) - colorRank(b) || a.name.localeCompare(b.name))
+  return direction === 'desc' ? sorted.reverse() : sorted
+}
+
+function CardPreview({ card, onTagClick }: { card: CardResult; onTagClick: (slug: string) => void }) {
+  const image = card.imageUris?.large ?? card.imageUris?.normal
+  const tags = trpc.card.tags.useQuery({ oracleId: card.oracleId })
+  const legalFormats = Object.entries(card.legalities)
+    .filter(([, status]) => status === 'legal')
+    .map(([format]) => format)
+
+  return (
+    <div className="flex flex-col gap-4">
+      {image ? (
+        <img src={image} alt={card.name} className="w-full rounded-lg border border-forge-border" />
+      ) : (
+        <div className="flex aspect-[5/7] w-full items-center justify-center border border-forge-border bg-forge-bg text-xs text-forge-text-muted">
+          No image
+        </div>
+      )}
+
+      <div>
+        <p className="text-xs uppercase tracking-wide text-forge-text-muted">Legal in</p>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {legalFormats.length === 0 && <span className="text-xs text-forge-text-muted">Nowhere</span>}
+          {legalFormats.map((format) => (
+            <span
+              key={format}
+              className="border border-forge-border px-2 py-0.5 text-[11px] uppercase tracking-wide text-forge-text-muted"
+            >
+              {format}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <p className="text-xs uppercase tracking-wide text-forge-text-muted">Tagger tags</p>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {tags.isLoading && <span className="text-xs text-forge-text-muted">Loading...</span>}
+          {tags.data?.length === 0 && <span className="text-xs text-forge-text-muted">None</span>}
+          {tags.data?.map((tag) => (
+            <button
+              key={tag.id}
+              type="button"
+              onClick={() => onTagClick(tag.slug)}
+              title={`Search cards tagged ${tag.label}`}
+              className="border border-forge-ember/40 px-2 py-0.5 text-[11px] text-forge-ember transition-colors hover:border-forge-ember hover:bg-forge-ember/10"
+            >
+              {tag.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default function CardSearchBox({
+  commanderColorIdentity,
+  excludeOracleIds,
+  onSelect,
+  onClose,
+}: CardSearchBoxProps) {
+  const [text, setText] = useState('')
+  const [tagChips, setTagChips] = useState<string[]>([])
+  const [tagDraft, setTagDraft] = useState('')
+  const [typeFilter, setTypeFilter] = useState('')
+  const [legendaryFilter, setLegendaryFilter] = useState<LegendaryFilter>('any')
+  const [colorFilter, setColorFilter] = useState<ColorLetter[]>([])
+  const [hoveredId, setHoveredId] = useState<string | null>(null)
+  const [sortField, setSortField] = useState<SortField>('name')
+  const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
+  const debouncedText = useDebouncedValue(text, 250)
+
+  function addTagChip(tag: string) {
+    // Defensive strip: a pasted/typed "tag:removal" still works as just "removal".
+    const slug = tag.trim().toLowerCase().replace(/^tag:/, '')
+    if (!slug) return
+    setTagChips((prev) => (prev.includes(slug) ? prev : [...prev, slug]))
+    setTagDraft('')
+  }
+
+  function removeTagChip(tag: string) {
+    setTagChips((prev) => prev.filter((t) => t !== tag))
+  }
+
+  // Type/color filters and tag chips are just additional clauses appended
+  // to the same Scryfall-like query string the box already sends — no
+  // separate backend filter path needed. Color uses "at most these" (c<=)
+  // rather than "at least" so picking a sub-palette of the commander's
+  // identity narrows results instead of requiring every checked color on
+  // every card.
+  const composedQuery = [
+    debouncedText,
+    typeFilter && `t:${typeFilter}`,
+    legendaryFilter === 'legendary' && 't:legendary',
+    legendaryFilter === 'non-legendary' && '-t:legendary',
+    colorFilter.length > 0 && `c<=${colorFilter.join('')}`,
+    ...tagChips.map((t) => `tag:${t}`),
+  ]
+    .filter(Boolean)
+    .join(' ')
+
+  const search = trpc.card.search.useQuery(
+    {
+      query: composedQuery,
+      commanderColorIdentity,
+      excludeOracleIds,
+      limit: 40,
+      sort: sortField === 'color' ? 'name' : sortField,
+      direction: sortDirection,
+    },
+    { enabled: composedQuery.trim().length > 0 },
+  )
+
+  const results = useMemo(() => {
+    if (!search.data) return search.data
+    return sortField === 'color' ? sortByColor(search.data, sortDirection) : search.data
+  }, [search.data, sortField, sortDirection])
+
+  const previewCard = results?.find((c) => c.oracleId === hoveredId) ?? results?.[0] ?? null
+
+  function toggleColor(letter: ColorLetter) {
+    setColorFilter((prev) => (prev.includes(letter) ? prev.filter((c) => c !== letter) : [...prev, letter]))
+  }
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-black/60" onClick={onClose} />
+      <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-4xl border-l border-forge-border bg-forge-surface shadow-[0_0_60px_rgba(0,0,0,0.6)]">
+        <div className="no-scrollbar hidden flex-1 overflow-y-auto p-5 sm:block">
+          {previewCard ? (
+            <CardPreview card={previewCard} onTagClick={addTagChip} />
+          ) : (
+            <p className="text-sm text-forge-text-muted">Hover a result to preview it here.</p>
+          )}
+        </div>
+
+        <div className="flex w-full max-w-sm flex-col border-l border-forge-border">
+          <div className="border-b border-forge-border p-4">
+            <div className="flex items-center justify-between">
+              <p className="font-display text-lg uppercase tracking-wide text-forge-text">Add a card</p>
+              <button type="button" onClick={onClose} aria-label="Close" className="text-forge-text-muted hover:text-forge-ember">
+                <CloseIcon />
+              </button>
+            </div>
+            <input
+              type="text"
+              autoFocus
+              placeholder="Card name..."
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              className="mt-3 w-full border border-forge-border bg-forge-bg px-3 py-2 text-sm text-forge-text outline-none focus:border-forge-ember"
+            />
+
+            <div className="mt-2 flex items-center justify-between">
+              <label className="text-[11px] uppercase tracking-wide text-forge-text-muted">Tags</label>
+              <a
+                href="https://tagger.scryfall.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[11px] text-forge-text-muted underline decoration-dotted hover:text-forge-ember"
+              >
+                Browse tags on Scryfall Tagger ↗
+              </a>
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 border border-forge-border bg-forge-bg p-1.5 focus-within:border-forge-ember">
+              {tagChips.map((tag) => (
+                <span
+                  key={tag}
+                  className="flex items-center gap-1 rounded border border-forge-ember/50 bg-forge-ember/15 py-0.5 pl-2 pr-1 text-xs font-medium text-forge-text"
+                >
+                  {tag}
+                  <button
+                    type="button"
+                    onClick={() => removeTagChip(tag)}
+                    aria-label={`Remove tag ${tag}`}
+                    className="text-forge-text-muted hover:text-forge-ember"
+                  >
+                    <CloseIcon className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+              <input
+                type="text"
+                placeholder={tagChips.length === 0 ? 'ramp, removal, wheel...' : 'Add another...'}
+                value={tagDraft}
+                onChange={(e) => setTagDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    addTagChip(tagDraft)
+                  } else if (e.key === 'Backspace' && !tagDraft && tagChips.length > 0) {
+                    // Backspacing on an empty draft pops the last chip — a
+                    // common "delete the thing I just typed" affordance.
+                    removeTagChip(tagChips[tagChips.length - 1])
+                  }
+                }}
+                className="min-w-[6rem] flex-1 bg-transparent py-0.5 text-sm text-forge-text outline-none"
+              />
+            </div>
+            <p className="mt-1 text-[11px] leading-snug text-forge-text-muted">
+              Type a tag (no <span className="text-forge-text">tag:</span> needed) and press Enter.
+            </p>
+
+            <div className="mt-3 flex items-center gap-2">
+              <select
+                value={typeFilter}
+                onChange={(e) => setTypeFilter(e.target.value)}
+                className="flex-1 border border-forge-border bg-forge-bg px-2 py-1.5 text-xs text-forge-text outline-none focus:border-forge-ember"
+              >
+                <option value="">Any type</option>
+                {TYPE_OPTIONS.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={legendaryFilter}
+                onChange={(e) => setLegendaryFilter(e.target.value as LegendaryFilter)}
+                className="flex-1 border border-forge-border bg-forge-bg px-2 py-1.5 text-xs text-forge-text outline-none focus:border-forge-ember"
+              >
+                {LEGENDARY_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              {commanderColorIdentity.length > 0 && (
+                <div className="flex shrink-0 items-center gap-1">
+                  {commanderColorIdentity.map((letter) => (
+                    <button
+                      key={letter}
+                      type="button"
+                      onClick={() => toggleColor(letter)}
+                      title={letter}
+                      className={`h-6 w-6 rounded-full border-2 transition-opacity ${COLOR_DOT[letter]} ${
+                        colorFilter.includes(letter) ? 'border-forge-ember' : 'border-transparent opacity-40'
+                      }`}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-2 flex items-center gap-2">
+              <select
+                value={sortField}
+                onChange={(e) => setSortField(e.target.value as SortField)}
+                className="flex-1 border border-forge-border bg-forge-bg px-2 py-1.5 text-xs text-forge-text outline-none focus:border-forge-ember"
+              >
+                {SORT_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    Sort: {opt.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => setSortDirection((d) => (d === 'asc' ? 'desc' : 'asc'))}
+                title={sortDirection === 'asc' ? 'Ascending' : 'Descending'}
+                className="shrink-0 border border-forge-border px-2.5 py-1.5 text-xs text-forge-text-muted hover:border-forge-ember hover:text-forge-ember"
+              >
+                {sortDirection === 'asc' ? '↑ Asc' : '↓ Desc'}
+              </button>
+            </div>
+          </div>
+
+          <div className="no-scrollbar flex-1 overflow-y-auto">
+            {composedQuery.trim().length === 0 && (
+              <p className="px-4 py-6 text-sm text-forge-text-muted">Start typing, or pick a type/color, to search.</p>
+            )}
+            {search.isLoading && <p className="px-4 py-6 text-sm text-forge-text-muted">Searching...</p>}
+            {results?.length === 0 && <p className="px-4 py-6 text-sm text-forge-text-muted">No matches.</p>}
+            <ul className="divide-y divide-forge-border">
+              {results?.map((card) => (
+                <li key={card.oracleId}>
+                  <button
+                    type="button"
+                    onMouseEnter={() => setHoveredId(card.oracleId)}
+                    onClick={() => onSelect(card)}
+                    className={`flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition-colors ${
+                      previewCard?.oracleId === card.oracleId ? 'bg-forge-surface-hover' : ''
+                    } text-forge-text hover:bg-forge-surface-hover`}
+                  >
+                    <span className="flex min-w-0 items-baseline gap-2">
+                      <span className="truncate">{card.name}</span>
+                      <span className="shrink-0 text-xs text-forge-text-muted">
+                        {card.priceUsd ? `$${card.priceUsd}` : '—'}
+                      </span>
+                    </span>
+                    <ManaCost cost={card.manaCost} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </div>
+    </>
+  )
+}
