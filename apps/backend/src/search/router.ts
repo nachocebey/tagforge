@@ -3,7 +3,8 @@ import type { Prisma } from '@prisma/client'
 import { router, publicProcedure } from '../trpc.js'
 import { parseSearchQuery } from './query-parser.js'
 import { buildCardSearchWhere } from './build-where.js'
-import { toCardDTO, toCardDTOs } from './card-dto.js'
+import { toCardDTOs } from './card-dto.js'
+import { resolveCardsByNames } from './resolve-names.js'
 
 const COLOR_LETTER = z.enum(['W', 'U', 'B', 'R', 'G'])
 // 'color' has no direct SQL ordering (colors is a WUBRG array, not a single
@@ -47,8 +48,16 @@ export const cardRouter = router({
         commanderColorIdentity: z.array(COLOR_LETTER).optional(),
         excludeOracleIds: z.array(z.string()).max(1000).default([]),
         sort: SORT.default('name'),
-        direction: DIRECTION.default('asc'),
+        // Named sortDirection, not "direction" — tRPC's useInfiniteQuery
+        // input type reserves the field name "direction" for its own
+        // forward/backward pagination concept, and silently rejects a
+        // same-named field of a different type at the call site.
+        sortDirection: DIRECTION.default('asc'),
         limit: z.number().int().min(1).max(100).default(50),
+        // Offset-based, not an opaque id — resolveOrderBy always has a
+        // stable `name asc` tiebreaker, so `skip`/`take` paging is
+        // consistent across pages for every sort option.
+        cursor: z.number().int().min(0).default(0),
       }),
     )
     .query(async ({ ctx, input }) => {
@@ -58,13 +67,17 @@ export const cardRouter = router({
         excludeOracleIds: input.excludeOracleIds,
       })
 
-      return toCardDTOs(
-        await ctx.prisma.card.findMany({
-          where,
-          orderBy: resolveOrderBy(input.sort, input.direction),
-          take: input.limit,
-        }),
-      )
+      const items = await ctx.prisma.card.findMany({
+        where,
+        orderBy: resolveOrderBy(input.sort, input.sortDirection),
+        skip: input.cursor,
+        take: input.limit,
+      })
+
+      return {
+        items: toCardDTOs(items),
+        nextCursor: items.length === input.limit ? input.cursor + items.length : undefined,
+      }
     }),
 
   // Resolves the full Card rows for a deck's block contents. deck.get only
@@ -92,8 +105,8 @@ export const cardRouter = router({
     }),
 
   // Real signal (which commanders show up most often across all saved
-  // decks), not an external popularity metric — EDHREC integration is
-  // explicitly out of scope for this project. Tops up with recently
+  // decks on this instance), not an external popularity metric — that's
+  // what edhrec/ is for. Tops up with recently
   // printed legendary creatures when there isn't enough deck data yet
   // (e.g. a fresh install) so the section is never empty.
   trendingCommanders: publicProcedure
@@ -136,10 +149,50 @@ export const cardRouter = router({
   tags: publicProcedure.input(z.object({ oracleId: z.string() })).query(async ({ ctx, input }) => {
     const taggings = await ctx.prisma.tagging.findMany({
       where: { cardId: input.oracleId },
-      select: { tag: { select: { id: true, slug: true, label: true } } },
+      select: { tag: { select: { id: true, slug: true, label: true, description: true } } },
     })
     return taggings.map((t) => t.tag)
   }),
+
+  // Same shape as `tags`, batched — powers "Replace with...": matching a
+  // card against every card in Considering by shared tags means fetching
+  // taggings for the whole candidate pool at once, not one round trip per
+  // candidate.
+  tagsByOracleIds: publicProcedure
+    .input(z.object({ oracleIds: z.array(z.string()).max(500) }))
+    .query(async ({ ctx, input }) => {
+      const uniqueOracleIds = [...new Set(input.oracleIds)]
+      if (uniqueOracleIds.length === 0) return {}
+
+      const taggings = await ctx.prisma.tagging.findMany({
+        where: { cardId: { in: uniqueOracleIds } },
+        select: { cardId: true, tag: { select: { id: true, slug: true, label: true, description: true } } },
+      })
+
+      const byOracleId: Record<string, typeof taggings[number]['tag'][]> = {}
+      for (const oracleId of uniqueOracleIds) byOracleId[oracleId] = []
+      for (const t of taggings) byOracleId[t.cardId]?.push(t.tag)
+      return byOracleId
+    }),
+
+  // Tag lookup by free text — matches slug or label (a search for "draw"
+  // should surface the tag literally called "draw", not just ones whose
+  // description happens to mention it). Powers a "what tags exist" search
+  // independent of any one card, e.g. an autocomplete while composing a
+  // `tag:` search clause.
+  searchTags: publicProcedure
+    .input(z.object({ query: z.string().min(1).max(100), limit: z.number().int().min(1).max(50).default(20) }))
+    .query(async ({ ctx, input }) => {
+      const tags = await ctx.prisma.tag.findMany({
+        where: {
+          OR: [{ slug: { contains: input.query, mode: 'insensitive' } }, { label: { contains: input.query, mode: 'insensitive' } }],
+        },
+        select: { id: true, slug: true, label: true, description: true },
+        orderBy: { slug: 'asc' },
+        take: input.limit,
+      })
+      return tags
+    }),
 
   // Resolves plain card names (as pasted from a decklist) to real cards, for
   // deck import. Two passes: exact case-insensitive name match first, then
@@ -152,36 +205,7 @@ export const cardRouter = router({
     .input(z.object({ names: z.array(z.string().min(1)).max(300) }))
     .query(async ({ ctx, input }) => {
       const uniqueNames = [...new Set(input.names.map((n) => n.trim()).filter(Boolean))]
-      if (uniqueNames.length === 0) return []
-
-      const exactMatches = await ctx.prisma.card.findMany({
-        where: { name: { in: uniqueNames, mode: 'insensitive' } },
-      })
-      const byLowerName = new Map(exactMatches.map((c) => [c.name.toLowerCase(), c]))
-
-      const results: { queriedName: string; card: ReturnType<typeof toCardDTO> | null }[] = []
-      const unresolved: string[] = []
-
-      for (const name of uniqueNames) {
-        const match = byLowerName.get(name.toLowerCase())
-        if (match) results.push({ queriedName: name, card: toCardDTO(match) })
-        else unresolved.push(name)
-      }
-
-      if (unresolved.length > 0) {
-        // One batched query instead of one findFirst per unresolved name —
-        // a decklist heavy on DFCs (transform, modal_dfc) could otherwise
-        // mean dozens of sequential round trips just to resolve fronts.
-        const dfcMatches = await ctx.prisma.card.findMany({
-          where: { OR: unresolved.map((name) => ({ name: { startsWith: `${name} // `, mode: 'insensitive' } })) },
-        })
-        for (const name of unresolved) {
-          const prefix = `${name.toLowerCase()} // `
-          const match = dfcMatches.find((c) => c.name.toLowerCase().startsWith(prefix))
-          results.push({ queriedName: name, card: match ? toCardDTO(match) : null })
-        }
-      }
-
-      return results
+      const resolved = await resolveCardsByNames(ctx.prisma, uniqueNames)
+      return uniqueNames.map((name) => ({ queriedName: name, card: resolved.get(name) ?? null }))
     }),
 })

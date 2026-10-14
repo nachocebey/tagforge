@@ -4,4 +4,4 @@
 // flag, so it needs no backend change: `DeckBlock.id` is already just a
 // free-form string in the persisted structure.
 export const CONSIDERING_BLOCK_ID = 'considering'
-export const CONSIDERING_BLOCK_NAME = 'Considering'
+export const CONSIDERING_BLOCK_NAME = 'CONSIDERING'

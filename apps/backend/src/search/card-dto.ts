@@ -7,6 +7,14 @@
 // the frontend. Every procedure returning card rows casts through this
 // type; the runtime objects are unchanged, only the static type is
 // narrowed.
+// Only transform/modal_dfc/flip card_faces entries carry their own
+// image_uris — split/adventure cards' faces exist but share one combined
+// image at the card level instead.
+export interface CardFaceDTO {
+  name: string
+  image_uris?: Record<string, string>
+}
+
 export interface CardDTO {
   oracleId: string
   name: string
@@ -16,10 +24,11 @@ export interface CardDTO {
   oracleText: string | null
   colors: string[]
   colorIdentity: string[]
+  producedMana: string[]
   layout: string
   releasedAt: Date
   imageUris: Record<string, string> | null
-  cardFaces: unknown
+  cardFaces: CardFaceDTO[] | null
   legalities: Record<string, string>
   prices: Record<string, string | null> | null
   priceUsd: string | null

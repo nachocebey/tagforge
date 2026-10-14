@@ -1,3 +1,11 @@
+// A double-faced card's card_faces entries, stored verbatim from Scryfall.
+// Only transform/modal_dfc/flip layouts carry a per-face image_uris — split
+// and adventure cards share one combined image at the card level instead.
+export interface CardFace {
+  name: string
+  image_uris?: Record<string, string>
+}
+
 // Hand-written rather than derived via `inferRouterOutputs<AppRouter>`:
 // that chain (tRPC's own generics wrapping Prisma's already-complex
 // generated Card type) hits TypeScript's "type instantiation is excessively
@@ -12,10 +20,11 @@ export interface CardResult {
   oracleText: string | null
   colors: string[]
   colorIdentity: string[]
+  producedMana: string[]
   layout: string
   releasedAt: string
   imageUris?: Record<string, string> | null
-  cardFaces?: unknown
+  cardFaces?: CardFace[] | null
   legalities: Record<string, string>
   prices?: Record<string, string | null> | null
   priceUsd: string | null
@@ -40,12 +49,19 @@ export interface DeckBlock {
   name: string
   order: number
   cardOracleIds: string[]
+  // Cards "also" shown here via a row's "Add also..." menu — a reference to
+  // a card that's genuinely placed in exactly one other block, not a second
+  // real copy. Never counted toward this block's own tally, the deck's
+  // total, mana curve/type counts, or export. May be absent on a deck saved
+  // before this field existed — always read via `?? []`.
+  shadowOracleIds?: string[]
 }
 
 export interface CardTag {
   id: string
   slug: string
   label: string
+  description: string | null
 }
 
 export interface DeckStructure {

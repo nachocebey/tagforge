@@ -1,5 +1,6 @@
 import { Prisma, type PrismaClient } from '@prisma/client'
 import { getBulkDataEntry, streamJsonl } from './bulk-data.js'
+import { buildCheapestPriceMap } from './prices.js'
 import { runBatched } from './run-batched.js'
 import { toCardRow, toTagRow, toTaggingRows } from './transform.js'
 import type { ScryfallCard, ScryfallTag } from './scryfall-types.js'
@@ -48,6 +49,8 @@ async function safeUpsert(fn: () => Promise<unknown>, context: string): Promise<
 }
 
 export async function ingestCards(prisma: PrismaClient): Promise<{ upserted: number; skipped: number }> {
+  const cheapestPriceByOracleId = await buildCheapestPriceMap()
+
   const entry = await getBulkDataEntry('oracle_cards')
   console.log(`Downloading oracle_cards (updated ${entry.updated_at})...`)
 
@@ -77,6 +80,10 @@ export async function ingestCards(prisma: PrismaClient): Promise<{ upserted: num
   for await (const raw of streamJsonl(entry.jsonl_download_uri)) {
     const row = toCardRow(raw as ScryfallCard)
     if (!row) continue
+    // Override the canonical printing's price with the cheapest one found
+    // across every printing of this card — see prices.ts for why.
+    const cheapest = cheapestPriceByOracleId.get(row.oracleId)
+    if (cheapest !== undefined) row.priceUsd = cheapest
     batch.push(row)
     if (batch.length >= CARD_BATCH_SIZE) {
       await flush()

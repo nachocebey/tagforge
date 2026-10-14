@@ -25,7 +25,7 @@ export default function CommanderSearchBox({
     { query: `${querySyntaxPrefix}${debouncedText}`, limit: 20 },
     { enabled: debouncedText.trim().length > 0 },
   )
-  const results = search.data
+  const results = search.data?.items
 
   return (
     <div className="space-y-2">

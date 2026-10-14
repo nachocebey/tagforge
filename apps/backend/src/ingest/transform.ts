@@ -103,6 +103,7 @@ export function toCardRow(card: ScryfallCard): CardRow | null {
     oracleText: oracleText || null,
     colors: effectiveColors(card),
     colorIdentity: card.color_identity,
+    producedMana: card.produced_mana ?? [],
     layout: card.layout,
     releasedAt: new Date(card.released_at),
     imageUris: (effectiveImageUris(card) ?? undefined) as Prisma.InputJsonValue | undefined,

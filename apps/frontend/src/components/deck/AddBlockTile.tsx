@@ -28,7 +28,7 @@ export default function AddBlockTile({ existingNames, onCreate }: AddBlockTilePr
     return (
       <form
         onSubmit={handleSubmit}
-        className="mb-3 flex min-h-[6rem] w-full break-inside-avoid flex-col items-center justify-center gap-3 border-2 border-dashed border-forge-ember bg-forge-surface p-4"
+        className="flex min-h-[6rem] w-full flex-col items-center justify-center gap-3 border-2 border-dashed border-forge-ember bg-forge-surface p-4"
       >
         <input
           autoFocus
@@ -58,7 +58,7 @@ export default function AddBlockTile({ existingNames, onCreate }: AddBlockTilePr
     <button
       type="button"
       onClick={() => setNaming(true)}
-      className="mb-3 flex min-h-[6rem] w-full break-inside-avoid flex-col items-center justify-center gap-2 border-2 border-dashed border-forge-border text-forge-text-muted transition-colors hover:border-forge-ember hover:text-forge-ember"
+      className="flex min-h-[6rem] w-full flex-col items-center justify-center gap-2 border-2 border-dashed border-forge-border text-forge-text-muted transition-colors hover:border-forge-ember hover:text-forge-ember"
     >
       <span className="text-3xl leading-none">+</span>
       <span className="text-xs uppercase tracking-wide">Click here to add a block</span>

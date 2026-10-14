@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { TRPCError } from '@trpc/server'
 import type { PrismaClient } from '@prisma/client'
 import { router, protectedProcedure } from '../trpc.js'
-import { deckStructureSchema, emptyDeckStructure, type DeckStructure } from './structure.js'
+import { deckStructureSchema, defaultDeckStructure, type DeckStructure } from './structure.js'
 import { validateCommanderPair } from './commander-pairing.js'
 import { toCardDTOs, type CardDTO } from '../search/card-dto.js'
 
@@ -77,7 +77,7 @@ export const deckRouter = router({
           userId: ctx.user.id,
           name: input.name,
           commanderOracleIds: input.commanderOracleIds,
-          structure: emptyDeckStructure,
+          structure: defaultDeckStructure(),
         },
       })
 

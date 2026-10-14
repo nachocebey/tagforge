@@ -38,6 +38,40 @@ export function GripIcon({ className = 'h-4 w-4' }: IconProps) {
   )
 }
 
+// "Flip to the other face" — two curved arrows forming a loop.
+export function FlipIcon({ className = 'h-4 w-4' }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={className}>
+      <path
+        d="M4 12a8 8 0 0 1 14.5-4.5M20 12a8 8 0 0 1-14.5 4.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M17.5 3.5v4h-4M6.5 20.5v-4h4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+// Overflow menu trigger — vertical "kebab" dots.
+export function KebabIcon({ className = 'h-4 w-4' }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
+      <circle cx="12" cy="5" r="1.6" />
+      <circle cx="12" cy="12" r="1.6" />
+      <circle cx="12" cy="19" r="1.6" />
+    </svg>
+  )
+}
+
+// Plain checkmark — e.g. "this card is already in your deck".
+export function CheckIcon({ className = 'h-4 w-4' }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} className={className}>
+      <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 export function TrashIcon({ className = 'h-4 w-4' }: IconProps) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} className={className}>

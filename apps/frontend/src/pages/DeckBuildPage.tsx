@@ -20,9 +20,13 @@ import ExportDeckModal from '../components/deck/ExportDeckModal'
 import ImportDeckModal from '../components/deck/ImportDeckModal'
 import ManaCost from '../components/deck/ManaCost'
 import { GripIcon } from '../components/deck/icons'
-import DragBlockDropPanel, { SIDE_PANEL_ID_PREFIX } from '../components/deck/DragBlockDropPanel'
+import DragBlockDropPanel, { SIDE_PANEL_ID_PREFIX, CREATE_NEW_BLOCK_DROP_ID } from '../components/deck/DragBlockDropPanel'
 import HandProbabilityRow from '../components/deck/HandProbabilityRow'
-import { CONSIDERING_BLOCK_ID } from '../lib/considering'
+import ManaBasePanel from '../components/deck/ManaBasePanel'
+import CommanderRecommendations, { RECOMMENDATION_DRAG_PREFIX } from '../components/deck/CommanderRecommendations'
+import TagSearchModal from '../components/deck/TagSearchModal'
+import CardSearchBox, { SEARCH_RESULT_DRAG_PREFIX } from '../components/deck/CardSearchBox'
+import { CONSIDERING_BLOCK_ID, CONSIDERING_BLOCK_NAME } from '../lib/considering'
 import type { CardResult, DeckDetail } from '../lib/trpc-types'
 
 const COLOR_LETTERS = ['W', 'U', 'B', 'R', 'G'] as const
@@ -69,21 +73,32 @@ function DeckBuilder({ deck }: { deck: DeckDetail }) {
   const {
     blocks,
     addBlock,
+    createBlockWithCard,
     renameBlock,
     removeBlock,
     addCard,
     removeCard,
+    addShadowCard,
+    removeShadowCard,
     moveCard,
     reorderBlocks,
     importBlocks,
+    replaceCard,
+    clearDeck,
   } = useDeckStructure(id, deck.structure)
   const [showExport, setShowExport] = useState(false)
   const [showImport, setShowImport] = useState(false)
+  const [showTagSearch, setShowTagSearch] = useState(false)
+  const [showFreeSearch, setShowFreeSearch] = useState(false)
   const [blockSort, setBlockSort] = useState<BlockSortField>('name')
   const [blockSortDirection, setBlockSortDirection] = useState<SortDirection>('asc')
   // Considering starts collapsed by default; every other block starts
   // expanded — ids not in this set are expanded.
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set([CONSIDERING_BLOCK_ID]))
+  // Set right after "Create new" (in the drag-drop side panel) makes a
+  // block, so that one block's name input can focus itself on mount —
+  // cleared immediately once it's consumed.
+  const [autoFocusBlockId, setAutoFocusBlockId] = useState<string | null>(null)
   const [activeDrag, setActiveDrag] = useState<{ oracleId: string; card?: CardResult; sourceBlockId: string } | null>(
     null,
   )
@@ -99,6 +114,12 @@ function DeckBuilder({ deck }: { deck: DeckDetail }) {
   function handleToggleOwned(oracleId: string) {
     if (ownedOracleIds.has(oracleId)) unmarkOwned.mutate({ oracleId })
     else markOwned.mutate({ oracleId })
+  }
+
+  function handleClearDeck() {
+    if (window.confirm('Remove every block and card from this deck? The commander stays, and Considering is left alone. This can\'t be undone.')) {
+      clearDeck()
+    }
   }
 
   function toggleCollapsed(blockId: string) {
@@ -126,6 +147,17 @@ function DeckBuilder({ deck }: { deck: DeckDetail }) {
     })
   }
 
+  // An EDHREC recommendation or a free-search result has no block to move
+  // *from* — it's a new card being placed, not an existing one being
+  // relocated — so neither drag id encodes a source block the way a real
+  // card row's `${blockId}::${oracleId}` does. Returns the oracle_id for
+  // either prefix, or null if `activeId` is a normal card-row drag.
+  function sourcelessOracleId(activeId: string): string | null {
+    if (activeId.startsWith(RECOMMENDATION_DRAG_PREFIX)) return activeId.slice(RECOMMENDATION_DRAG_PREFIX.length)
+    if (activeId.startsWith(SEARCH_RESULT_DRAG_PREFIX)) return activeId.slice(SEARCH_RESULT_DRAG_PREFIX.length)
+    return null
+  }
+
   function handleDragStart(event: DragStartEvent) {
     const id = String(event.active.id)
     // A block's own grip handle — not a card row — is being dragged; skip
@@ -136,7 +168,7 @@ function DeckBuilder({ deck }: { deck: DeckDetail }) {
       return
     }
     const data = event.active.data.current as { oracleId: string; card?: CardResult } | undefined
-    const [sourceBlockId] = id.split('::')
+    const sourceBlockId = sourcelessOracleId(id) === null ? id.split('::')[0] : ''
     if (data) setActiveDrag({ ...data, sourceBlockId })
   }
 
@@ -153,11 +185,29 @@ function DeckBuilder({ deck }: { deck: DeckDetail }) {
     setActiveDrag(null)
     // Dropped outside any block (or the side panel) — snap back, no-op.
     if (!over) return
-    const [fromBlockId, oracleId] = activeId.split('::')
     const overId = String(over.id)
+    const sourceless = sourcelessOracleId(activeId)
+
+    // "Create new" in the side panel — the target block doesn't exist yet,
+    // so this can't resolve to a toBlockId the way every other drop target
+    // does; make the block and place the card into it in one step instead.
+    if (overId === CREATE_NEW_BLOCK_DROP_ID) {
+      const oracleId = sourceless ?? activeId.split('::')[1]
+      const fromBlockId = sourceless === null ? activeId.split('::')[0] : undefined
+      setAutoFocusBlockId(createBlockWithCard(oracleId, fromBlockId))
+      return
+    }
+
     // The side panel's drop targets share ids with the in-page blocks
     // (prefixed) so both are valid drop targets for the same block at once.
     const toBlockId = overId.startsWith(SIDE_PANEL_ID_PREFIX) ? overId.slice(SIDE_PANEL_ID_PREFIX.length) : overId
+
+    if (sourceless !== null) {
+      addCard(toBlockId, sourceless)
+      return
+    }
+
+    const [fromBlockId, oracleId] = activeId.split('::')
     moveCard(fromBlockId, toBlockId, oracleId)
   }
 
@@ -167,6 +217,19 @@ function DeckBuilder({ deck }: { deck: DeckDetail }) {
 
   const consideringBlock = blocks.find((b) => b.id === CONSIDERING_BLOCK_ID)
   const normalBlocks = blocks.filter((b) => b.id !== CONSIDERING_BLOCK_ID)
+  // Render-only ordering: a block named "Lands" always leads (every deck
+  // has one and it's the block people check most often), then every other
+  // still-empty block (in their existing relative order), then every
+  // populated one — so a block settles into the "populated" group as soon
+  // as it gets its first card instead of sitting wherever it happened to be
+  // among a mix of empty and full blocks. Doesn't touch `block.order`/manual
+  // reordering, just where each one lands in the grid.
+  const isLands = (b: (typeof normalBlocks)[number]) => b.name.toUpperCase() === 'LANDS'
+  const orderedNormalBlocks = [
+    ...normalBlocks.filter((b) => isLands(b)),
+    ...normalBlocks.filter((b) => !isLands(b) && b.cardOracleIds.length === 0),
+    ...normalBlocks.filter((b) => !isLands(b) && b.cardOracleIds.length > 0),
+  ]
 
   // Cards parked in Considering aren't part of the deck, so they're kept
   // out of the exclusion set every normal block's search uses — a card
@@ -194,14 +257,23 @@ function DeckBuilder({ deck }: { deck: DeckDetail }) {
 
   const deckCardCount = normalBlocks.reduce((sum, b) => sum + b.cardOracleIds.length, 0) + commanders.length
   const typeCounts = countByType(deckOracleIds, cardsById)
+  // Commander(s) + normal blocks only — same scope as deckCardCount.
+  // Considering deliberately isn't part of the deck, so its cards aren't
+  // priced in here either. Sums whatever priceUsd each card resolved to
+  // (the cheapest-across-printings figure the ingestion job computes), not
+  // a tracked/historical price — just a live estimate from what's shown.
+  const deckTotalPrice = deckOracleIds.reduce((sum, oracleId) => {
+    const price = cardsById.get(oracleId)?.priceUsd
+    return price ? sum + Number(price) : sum
+  }, 0)
 
   return (
     <div className="px-6 py-8">
       <div className="flex items-center justify-between">
         <DeckNameEditor key={id} deckId={id} initialName={name} />
         <div className="flex items-center gap-4">
-          <span className="text-sm text-forge-text-muted">
-            <span className="font-display text-forge-ember">{deckCardCount}</span> / 100
+          <span className="text-sm text-forge-text-muted" title="Estimated total — cheapest printing found per card">
+            ~<span className="font-display text-forge-ember">${deckTotalPrice.toFixed(2)}</span>
           </span>
           <button
             type="button"
@@ -217,6 +289,14 @@ function DeckBuilder({ deck }: { deck: DeckDetail }) {
           >
             Export
           </button>
+          <button
+            type="button"
+            onClick={handleClearDeck}
+            title="Remove every block and card — keeps the commander and Considering"
+            className="border border-forge-border px-3 py-1.5 text-xs uppercase tracking-wide text-forge-text-muted hover:border-red-400 hover:text-red-400"
+          >
+            Clear deck
+          </button>
           <Link to="/decks" className="text-sm text-forge-text-muted hover:text-forge-ember">
             Back to decks
           </Link>
@@ -227,11 +307,67 @@ function DeckBuilder({ deck }: { deck: DeckDetail }) {
         <CommanderHeader commanders={commanders} />
       </div>
 
-      <HandProbabilityRow deckOracleIds={deckBodyOracleIds} cardsById={cardsById} />
+      <div className="mt-6">
+        <HandProbabilityRow deckOracleIds={deckBodyOracleIds} cardsById={cardsById} />
+      </div>
+
+      <div className="mt-6">
+        <ManaBasePanel
+          deckOracleIds={deckOracleIds}
+          cardsById={cardsById}
+          commanderColorIdentity={commanderColorIdentity}
+        />
+      </div>
 
       <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+        {/* Stays visible as you add cards, not just on an empty deck — single
+            commander only, see CommanderRecommendations/slug.ts for why
+            partner pairs aren't attempted. */}
+        {commanders.length === 1 && (
+          <div className="mt-6">
+            <CommanderRecommendations
+              commanderName={commanders[0].name}
+              presentOracleIds={new Set(uniqueAllOracleIds)}
+            />
+          </div>
+        )}
+
+        {consideringBlock && (
+          <div className="mt-6">
+            <DeckBlock
+              block={consideringBlock}
+              cardsById={cardsById}
+              commanderColorIdentity={commanderColorIdentity}
+              excludeOracleIds={uniqueAllOracleIds}
+              variant="considering"
+              onRename={() => {}}
+              onRemove={() => {}}
+              onAddCard={(card) => addCard(CONSIDERING_BLOCK_ID, card.oracleId)}
+              onRemoveCard={(oracleId) => removeCard(CONSIDERING_BLOCK_ID, oracleId)}
+              sortIndex={sortIndex}
+              ownedOracleIds={ownedOracleIds}
+              onToggleOwned={handleToggleOwned}
+              collapsed={collapsedIds.has(CONSIDERING_BLOCK_ID)}
+              onToggleCollapsed={() => toggleCollapsed(CONSIDERING_BLOCK_ID)}
+              allBlocks={blocks}
+              onAddAlso={addShadowCard}
+              onRemoveShadowCard={(oracleId) => removeShadowCard(CONSIDERING_BLOCK_ID, oracleId)}
+              consideringOracleIds={consideringBlock.cardOracleIds}
+              onReplaceCard={() => {}}
+            />
+          </div>
+        )}
+
         <div className="mt-8 flex items-center justify-between gap-4">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            {/* Boxed, unlike the plain dot-separated type breakdown next to
+                it — the total is the headline number, not one more entry
+                in that list. */}
+            <span className="flex items-center gap-1 border border-forge-border px-2 py-1 text-sm text-forge-text">
+              <span className="font-display text-forge-ember">{deckCardCount}</span>
+              <span className="text-forge-text-muted">/ 100</span>
+            </span>
+            <span className="text-forge-border">·</span>
             {TYPE_COUNT_CATEGORIES.map(({ type, label }, i) => (
               <span key={type} className="flex items-center gap-3">
                 {i > 0 && <span className="text-forge-border">·</span>}
@@ -243,6 +379,21 @@ function DeckBuilder({ deck }: { deck: DeckDetail }) {
           </div>
 
           <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowFreeSearch(true)}
+              title="Browse cards without picking a block first — selections land in Considering"
+              className="border border-forge-border px-2.5 py-1.5 text-xs uppercase tracking-wide text-forge-text-muted hover:border-forge-ember hover:text-forge-ember"
+            >
+              Search Cards
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowTagSearch(true)}
+              className="border border-forge-border px-2.5 py-1.5 text-xs uppercase tracking-wide text-forge-text-muted hover:border-forge-ember hover:text-forge-ember"
+            >
+              Search Tags
+            </button>
             <button
               type="button"
               onClick={toggleCollapseAll}
@@ -273,38 +424,21 @@ function DeckBuilder({ deck }: { deck: DeckDetail }) {
           </div>
         </div>
 
-        {consideringBlock && (
-          <div className="mt-6">
-            <DeckBlock
-              block={consideringBlock}
-              cardsById={cardsById}
-              commanderColorIdentity={commanderColorIdentity}
-              excludeOracleIds={uniqueAllOracleIds}
-              variant="considering"
-              onRename={() => {}}
-              onRemove={() => {}}
-              onAddCard={(card) => addCard(CONSIDERING_BLOCK_ID, card.oracleId)}
-              onRemoveCard={(oracleId) => removeCard(CONSIDERING_BLOCK_ID, oracleId)}
-              sortIndex={sortIndex}
-              ownedOracleIds={ownedOracleIds}
-              onToggleOwned={handleToggleOwned}
-              collapsed={collapsedIds.has(CONSIDERING_BLOCK_ID)}
-              onToggleCollapsed={() => toggleCollapsed(CONSIDERING_BLOCK_ID)}
-            />
-          </div>
-        )}
-
         {/*
-          Masonry via CSS multi-column, not CSS Grid: Grid's row tracks all
-          size to the row's tallest item, so one huge "Imported" block would
-          push every block after it (in the same row) down to clear that
-          height even though they're short. Columns let each column flow
-          independently — a tall block just occupies its whole column while
-          short ones keep stacking near the top of theirs.
+          A real grid, not CSS multi-column masonry — masonry used to be
+          necessary because an unbounded "one huge block" would otherwise
+          push every short block after it (in the same row) down to match
+          its height. Now every populated block shares one fixed height
+          (DeckBlock scrolls its own card list internally), so that problem
+          no longer applies — and masonry had its own downside: reflowing
+          every block's position each time any block's height changed
+          (e.g. on every single card add), which made the whole grid feel
+          unstable. `items-start` keeps a still-empty block at its own
+          natural (small) height instead of stretching it to match its row.
         */}
-        <div className="mt-8 columns-1 gap-3 sm:columns-2 lg:columns-3 xl:columns-4 2xl:columns-5">
+        <div className="mt-8 grid grid-cols-1 items-start gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
           <AddBlockTile existingNames={blocks.map((b) => b.name)} onCreate={addBlock} />
-          {normalBlocks.map((block) => (
+          {orderedNormalBlocks.map((block) => (
             <DeckBlock
               key={block.id}
               block={block}
@@ -320,6 +454,13 @@ function DeckBuilder({ deck }: { deck: DeckDetail }) {
               onToggleOwned={handleToggleOwned}
               collapsed={collapsedIds.has(block.id)}
               onToggleCollapsed={() => toggleCollapsed(block.id)}
+              allBlocks={blocks}
+              onAddAlso={addShadowCard}
+              onRemoveShadowCard={(oracleId) => removeShadowCard(block.id, oracleId)}
+              autoFocusName={block.id === autoFocusBlockId}
+              onAutoFocused={() => setAutoFocusBlockId(null)}
+              consideringOracleIds={consideringBlock?.cardOracleIds ?? []}
+              onReplaceCard={(oldOracleId, newOracleId) => replaceCard(block.id, oldOracleId, newOracleId)}
             />
           ))}
         </div>
@@ -340,22 +481,39 @@ function DeckBuilder({ deck }: { deck: DeckDetail }) {
             </div>
           )}
         </DragOverlay>
+
+        {showFreeSearch && (
+          // No block to place into yet — a click still parks the card in
+          // Considering (the deck's own "not sure where this goes" pile),
+          // but its results are draggable like any deck card row, so it can
+          // also go straight to a block or "Create new" via the side panel
+          // above. Rendered inside DndContext (unlike the other modals
+          // below) specifically so that drag works.
+          <CardSearchBox
+            commanderColorIdentity={commanderColorIdentity}
+            excludeOracleIds={uniqueDeckOracleIds}
+            blockName={CONSIDERING_BLOCK_NAME}
+            onSelect={(card) => addCard(CONSIDERING_BLOCK_ID, card.oracleId)}
+            onClose={() => setShowFreeSearch(false)}
+          />
+        )}
       </DndContext>
 
+      {showTagSearch && <TagSearchModal onClose={() => setShowTagSearch(false)} />}
       {showExport && (
         <ExportDeckModal
           onClose={() => setShowExport(false)}
           deckName={name}
-          commanders={commanders}
           blocks={blocks}
           cardsById={cardsById}
+          commanders={commanders}
           hasConsidering={Boolean(consideringBlock && consideringBlock.cardOracleIds.length > 0)}
         />
       )}
       {showImport && (
         <ImportDeckModal
           onClose={() => setShowImport(false)}
-          existingOracleIds={uniqueAllOracleIds}
+          commanderOracleIds={commanders.map((c) => c.oracleId)}
           onImport={importBlocks}
         />
       )}

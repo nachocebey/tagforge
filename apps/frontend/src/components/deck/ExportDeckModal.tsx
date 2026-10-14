@@ -6,27 +6,28 @@ import { CloseIcon } from './icons'
 interface ExportDeckModalProps {
   onClose: () => void
   deckName: string
-  commanders: CardResult[]
   blocks: DeckBlock[]
   cardsById: Map<string, CardResult>
+  commanders: CardResult[]
   hasConsidering: boolean
 }
 
 export default function ExportDeckModal({
   onClose,
   deckName,
-  commanders,
   blocks,
   cardsById,
+  commanders,
   hasConsidering,
 }: ExportDeckModalProps) {
   const [copied, setCopied] = useState(false)
-  const [withTags, setWithTags] = useState(true)
+  const [withTags, setWithTags] = useState(false)
   const [includeConsidering, setIncludeConsidering] = useState(false)
+  const [includeCommander, setIncludeCommander] = useState(false)
 
   const text = useMemo(
-    () => formatDecklist(deckName, commanders, blocks, cardsById, { withTags, includeConsidering }),
-    [deckName, commanders, blocks, cardsById, withTags, includeConsidering],
+    () => formatDecklist(blocks, cardsById, commanders, { withTags, includeConsidering, includeCommander }),
+    [blocks, cardsById, commanders, withTags, includeConsidering, includeCommander],
   )
 
   async function handleCopy() {
@@ -58,6 +59,15 @@ export default function ExportDeckModal({
         <p className="mt-1 text-xs text-forge-text-muted">Plain text, Moxfield-compatible.</p>
 
         <div className="mt-4 flex items-center gap-4">
+          <label className="flex items-center gap-1.5 text-sm text-forge-text">
+            <input
+              type="checkbox"
+              checked={includeCommander}
+              onChange={(e) => setIncludeCommander(e.target.checked)}
+              className="accent-forge-ember"
+            />
+            Commander
+          </label>
           <label className="flex items-center gap-1.5 text-sm text-forge-text">
             <input
               type="checkbox"

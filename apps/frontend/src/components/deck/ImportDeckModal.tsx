@@ -6,19 +6,27 @@ import { CloseIcon } from './icons'
 
 interface ImportDeckModalProps {
   onClose: () => void
-  existingOracleIds: string[]
+  // Only the commander(s) — not the current deck's blocks or Considering.
+  // Import now *replaces* every non-Considering block wholesale, so the
+  // only thing worth pre-excluding is accidentally importing the
+  // commander as a regular deck card.
+  commanderOracleIds: string[]
   onImport: (sections: { name: string; cardOracleIds: string[] }[]) => void
 }
 
 const COMMANDER_SECTION_NAMES = new Set(['commander', 'commanders'])
 
-export default function ImportDeckModal({ onClose, existingOracleIds, onImport }: ImportDeckModalProps) {
+export default function ImportDeckModal({ onClose, commanderOracleIds, onImport }: ImportDeckModalProps) {
   const [text, setText] = useState('')
   const [importing, setImporting] = useState(false)
   const [report, setReport] = useState<{ added: number; notFound: string[]; skipped: number } | null>(null)
   const utils = trpc.useUtils()
 
   async function handleImport() {
+    if (!window.confirm('Importing will replace all your current blocks (except Considering) with this decklist. Continue?')) {
+      return
+    }
+
     setImporting(true)
     setReport(null)
 
@@ -28,7 +36,10 @@ export default function ImportDeckModal({ onClose, existingOracleIds, onImport }
     const resolved = allNames.length > 0 ? await utils.client.card.resolveByNames.query({ names: allNames }) : []
     const cardByName = new Map(resolved.map((r) => [r.queriedName.toLowerCase(), r.card]))
 
-    const seen = new Set(existingOracleIds)
+    // Only dedupes against the commander(s) and against itself within this
+    // same import — not against the deck's current contents, since those
+    // are being replaced, not merged into.
+    const seen = new Set(commanderOracleIds)
     const notFound: string[] = []
     let added = 0
     let skipped = 0
@@ -73,7 +84,11 @@ export default function ImportDeckModal({ onClose, existingOracleIds, onImport }
         </div>
         <p className="mt-1 text-xs text-forge-text-muted">
           Paste a plain-text decklist ("1 Sol Ring" per line). Blank lines starting a new section become blocks; a
-          "Commander" section is skipped since your commander is already set.
+          "Commander" section is skipped since your commander is already set.{' '}
+          <span className="text-forge-text">
+            This replaces all your current blocks with this decklist — Considering is left alone, except a card
+            here that's also in the new decklist gets removed from Considering.
+          </span>
         </p>
 
         <textarea
@@ -89,7 +104,7 @@ export default function ImportDeckModal({ onClose, existingOracleIds, onImport }
             <p>
               Added <span className="text-forge-ember">{report.added}</span> card
               {report.added === 1 ? '' : 's'}
-              {report.skipped > 0 && ` (${report.skipped} already in deck, skipped)`}.
+              {report.skipped > 0 && ` (${report.skipped} skipped — your commander or a duplicate in the list)`}.
             </p>
             {report.notFound.length > 0 && (
               <p className="mt-1 text-red-400">Not found: {report.notFound.join(', ')}</p>

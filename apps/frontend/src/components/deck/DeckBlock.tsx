@@ -1,10 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useDraggable, useDroppable } from '@dnd-kit/core'
 import type { CardResult, DeckBlock as DeckBlockType } from '../../lib/trpc-types'
 import { BASIC_LAND_NAMES } from '../../lib/basic-lands'
+import { TYPE_GROUPS, TYPE_GROUP_LABELS, typeGroupOf } from '../../lib/card-type-groups'
 import { formatBlock } from '../../lib/decklist-format'
 import CardSearchBox from './CardSearchBox'
 import DraggableCardRow from './DraggableCardRow'
+import ReplaceCardModal from './ReplaceCardModal'
 import { CloseIcon, GripIcon } from './icons'
 
 // Prefixes a block-reorder drag's id so DeckBuildPage's onDragEnd can tell
@@ -31,6 +33,23 @@ interface DeckBlockProps {
   // 'considering' renders the fixed "maybe pile" panel: full-width, name
   // isn't editable, and it can't be removed.
   variant?: 'normal' | 'considering'
+  // Every block in the deck (Considering included) — used to compute a row's
+  // "Add also..." target list (every block that doesn't already hold this
+  // card, for real or as a shadow).
+  allBlocks: DeckBlockType[]
+  onAddAlso: (targetBlockId: string, oracleId: string) => void
+  onRemoveShadowCard: (oracleId: string) => void
+  // Set for the one block just created via the drag-drop panel's "Create
+  // new" option — focuses (and selects) the name input on mount so the
+  // user can immediately overwrite the "NEW BLOCK" default. Consumed once:
+  // the parent clears it via onAutoFocused right after.
+  autoFocusName?: boolean
+  onAutoFocused?: () => void
+  // "Replace with..." pool + action — only offered on real rows in a
+  // normal block (not Considering's own rows, not shadow references: there
+  // isn't a single "this block" to swap within for either of those).
+  consideringOracleIds: string[]
+  onReplaceCard: (oldOracleId: string, newOracleId: string) => void
 }
 
 export default function DeckBlock({
@@ -48,10 +67,25 @@ export default function DeckBlock({
   collapsed,
   onToggleCollapsed,
   variant = 'normal',
+  allBlocks,
+  onAddAlso,
+  onRemoveShadowCard,
+  autoFocusName = false,
+  onAutoFocused,
+  consideringOracleIds,
+  onReplaceCard,
 }: DeckBlockProps) {
   const isConsidering = variant === 'considering'
+  const nameInputRef = useRef<HTMLInputElement>(null)
   const [searching, setSearching] = useState(false)
+  // Set when a row's eye icon is clicked — opens the same search panel but
+  // with this card shown in the preview pane and an empty search box,
+  // rather than to add a new card.
+  const [viewingCard, setViewingCard] = useState<CardResult | null>(null)
   const [copied, setCopied] = useState(false)
+  // Set when a row's "Replace with..." is clicked — the oracle_id being
+  // replaced, so the modal knows what to match tags against.
+  const [replacingOracleId, setReplacingOracleId] = useState<string | null>(null)
   const { setNodeRef, isOver } = useDroppable({ id: block.id })
   // A block's own droppable region (above) doubles as the drop target for
   // reordering — dropping a dragged block anywhere within another block's
@@ -63,6 +97,17 @@ export default function DeckBlock({
     isDragging,
   } = useDraggable({ id: `${BLOCK_DRAG_PREFIX}${block.id}`, disabled: isConsidering })
 
+  useEffect(() => {
+    if (!autoFocusName) return
+    nameInputRef.current?.focus()
+    nameInputRef.current?.select()
+    onAutoFocused?.()
+    // onAutoFocused intentionally left out — it's a fresh closure every
+    // render, and re-running this on that change would refocus the input
+    // whenever the parent happens to re-render for an unrelated reason.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoFocusName])
+
   async function handleCopy() {
     await navigator.clipboard.writeText(formatBlock(block, cardsById))
     setCopied(true)
@@ -71,16 +116,57 @@ export default function DeckBlock({
 
   // Basics (the singleton exception) can have many copies of the same
   // oracle_id — group them into one row with a xN count and +/- controls
-  // instead of repeating an identical row per copy. Ordered by the global
-  // sort selector (mana cost/price/release date/name), which applies inside
-  // every block at once rather than to any one block individually.
-  const groupedEntries = useMemo(() => {
+  // instead of repeating an identical row per copy. Shadow references (from
+  // another row's "Add also...") are appended as their own single-count
+  // entries, then the whole thing is ordered by the global sort selector
+  // (mana cost/price/release date/name), same as every other block.
+  const combinedEntries = useMemo(() => {
     const counts = new Map<string, number>()
     for (const oracleId of block.cardOracleIds) counts.set(oracleId, (counts.get(oracleId) ?? 0) + 1)
-    return [...counts.entries()].sort(
-      ([a], [b]) => (sortIndex.get(a) ?? Infinity) - (sortIndex.get(b) ?? Infinity),
+    const real = [...counts.entries()].map(([oracleId, count]) => ({ oracleId, count, isShadow: false }))
+    const shadow = (block.shadowOracleIds ?? []).map((oracleId) => ({ oracleId, count: 1, isShadow: true }))
+    return [...real, ...shadow].sort(
+      (a, b) => (sortIndex.get(a.oracleId) ?? Infinity) - (sortIndex.get(b.oracleId) ?? Infinity),
     )
-  }, [block.cardOracleIds, sortIndex])
+  }, [block.cardOracleIds, block.shadowOracleIds, sortIndex])
+
+  // Considering only: bucket the same (already sorted) entries by primary
+  // card type — a "maybe pile" is easier to scan grouped by Creatures/
+  // Lands/etc. than as one long undifferentiated list.
+  const groupedByType = useMemo(() => {
+    if (!isConsidering) return null
+    const buckets = new Map<string, typeof combinedEntries>()
+    for (const entry of combinedEntries) {
+      const card = cardsById.get(entry.oracleId)
+      const group = card ? typeGroupOf(card) : 'Other'
+      if (!buckets.has(group)) buckets.set(group, [])
+      buckets.get(group)!.push(entry)
+    }
+    return TYPE_GROUPS.map((g) => [g, buckets.get(g) ?? []] as const).filter(([, entries]) => entries.length > 0)
+  }, [isConsidering, combinedEntries, cardsById])
+
+  // Every other block that doesn't already hold this card (for real, or as
+  // its own shadow reference) — the target list for this row's "Add
+  // also..." menu.
+  function addAlsoTargets(oracleId: string) {
+    return allBlocks
+      .filter(
+        (b) =>
+          b.id !== block.id && !b.cardOracleIds.includes(oracleId) && !(b.shadowOracleIds ?? []).includes(oracleId),
+      )
+      .map((b) => ({ id: b.id, name: b.name }))
+  }
+
+  // Once a block has anything visible in it, it gets the same fixed height
+  // as every other populated block (card list scrolls internally) instead
+  // of growing with its card count — that growth was what made the grid
+  // reflow unpredictably every time a card was added anywhere. An empty
+  // block keeps its small natural size until that first card lands.
+  const hasContent = combinedEntries.length > 0
+  // Lands is the one block every deck leans on most — flagging it in the
+  // accent color makes it easy to spot at a glance in a grid full of
+  // otherwise identically-styled blocks.
+  const isLandsBlock = !isConsidering && block.name.toUpperCase() === 'LANDS'
 
   return (
     <div
@@ -90,9 +176,9 @@ export default function DeckBlock({
           ? `mb-8 flex w-full flex-col border border-dashed bg-forge-surface transition-colors ${
               isOver ? 'border-forge-ember' : 'border-forge-border'
             }`
-          : `mb-3 flex w-full break-inside-avoid flex-col border bg-forge-surface transition-colors ${
-              collapsed ? '' : 'min-h-[6rem]'
-            } ${isOver ? 'border-forge-ember' : 'border-forge-border'} ${isDragging ? 'opacity-40' : ''}`
+          : `flex w-full flex-col border bg-forge-surface transition-colors ${
+              collapsed ? '' : hasContent ? 'h-[26rem]' : 'min-h-[6rem]'
+            } ${isOver || isLandsBlock ? 'border-forge-ember' : 'border-forge-border'} ${isDragging ? 'opacity-40' : ''}`
       }
     >
       <div className="flex items-center justify-between gap-2 border-b border-forge-border px-3 py-2">
@@ -127,8 +213,15 @@ export default function DeckBlock({
           </div>
         ) : (
           <input
+            ref={nameInputRef}
             value={block.name}
             onChange={(e) => onRename(e.target.value)}
+            onKeyDown={(e) => {
+              // The name is already saved on every keystroke (autosave is
+              // debounced from there, same as everything else) — Enter just
+              // signals "I'm done", so drop focus rather than doing nothing.
+              if (e.key === 'Enter') e.currentTarget.blur()
+            }}
             aria-label="Block name"
             className="min-w-0 flex-1 bg-transparent font-display text-base uppercase tracking-wide text-forge-text outline-none hover:bg-forge-bg focus:bg-forge-bg"
           />
@@ -167,26 +260,72 @@ export default function DeckBlock({
 
       {!collapsed && (
         <>
-          <ul className="min-h-[2rem] divide-y divide-forge-border">
-            {groupedEntries.map(([oracleId, count]) => {
-              const card = cardsById.get(oracleId)
-              const isRepeatable = card ? BASIC_LAND_NAMES.includes(card.name) : false
-              return (
-                <DraggableCardRow
-                  key={oracleId}
-                  dragId={`${block.id}::${oracleId}`}
-                  oracleId={oracleId}
-                  card={card}
-                  count={count}
-                  isRepeatable={isRepeatable}
-                  owned={ownedOracleIds.has(oracleId)}
-                  onAddCard={onAddCard}
-                  onRemoveCard={onRemoveCard}
-                  onToggleOwned={onToggleOwned}
-                />
-              )
-            })}
-          </ul>
+          {isConsidering ? (
+            <div className="min-h-[2rem] columns-3 gap-x-4">
+              {groupedByType!.map(([group, entries]) => (
+                <div key={group} className="mb-3 break-inside-avoid">
+                  <p className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-forge-text-muted">
+                    {TYPE_GROUP_LABELS[group]} · {entries.length}
+                  </p>
+                  <ul className="divide-y divide-forge-border">
+                    {entries.map(({ oracleId, count, isShadow }) => {
+                      const card = cardsById.get(oracleId)
+                      const isRepeatable = !isShadow && card ? BASIC_LAND_NAMES.includes(card.name) : false
+                      return (
+                        <DraggableCardRow
+                          key={oracleId}
+                          dragId={`${block.id}::${oracleId}`}
+                          oracleId={oracleId}
+                          card={card}
+                          count={count}
+                          isRepeatable={isRepeatable}
+                          isShadow={isShadow}
+                          owned={ownedOracleIds.has(oracleId)}
+                          onAddCard={onAddCard}
+                          onRemoveCard={(oid) => (isShadow ? onRemoveShadowCard(oid) : onRemoveCard(oid))}
+                          onToggleOwned={onToggleOwned}
+                          onViewCard={setViewingCard}
+                          addAlsoTargets={addAlsoTargets(oracleId)}
+                          onAddAlso={(targetBlockId) => onAddAlso(targetBlockId, oracleId)}
+                          breakInsideAvoid
+                        />
+                      )
+                    })}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <ul
+              className={`divide-y divide-forge-border ${
+                hasContent ? 'min-h-0 flex-1 overflow-y-auto' : 'min-h-[2rem]'
+              }`}
+            >
+              {combinedEntries.map(({ oracleId, count, isShadow }) => {
+                const card = cardsById.get(oracleId)
+                const isRepeatable = !isShadow && card ? BASIC_LAND_NAMES.includes(card.name) : false
+                return (
+                  <DraggableCardRow
+                    key={oracleId}
+                    dragId={`${block.id}::${oracleId}`}
+                    oracleId={oracleId}
+                    card={card}
+                    count={count}
+                    isRepeatable={isRepeatable}
+                    isShadow={isShadow}
+                    owned={ownedOracleIds.has(oracleId)}
+                    onAddCard={onAddCard}
+                    onRemoveCard={(oid) => (isShadow ? onRemoveShadowCard(oid) : onRemoveCard(oid))}
+                    onToggleOwned={onToggleOwned}
+                    onViewCard={setViewingCard}
+                    addAlsoTargets={addAlsoTargets(oracleId)}
+                    onAddAlso={(targetBlockId) => onAddAlso(targetBlockId, oracleId)}
+                    onReplace={isShadow ? undefined : () => setReplacingOracleId(oracleId)}
+                  />
+                )
+              })}
+            </ul>
+          )}
 
           <div className="mt-auto p-2">
             {!searching && (
@@ -198,18 +337,36 @@ export default function DeckBlock({
                 + Add card
               </button>
             )}
-            {searching && (
+            {(searching || viewingCard) && (
               <CardSearchBox
                 commanderColorIdentity={commanderColorIdentity}
                 excludeOracleIds={excludeOracleIds}
+                previewOnlyCard={viewingCard ?? undefined}
+                blockName={block.name}
                 onSelect={(card) => {
                   onAddCard(card)
                 }}
-                onClose={() => setSearching(false)}
+                onClose={() => {
+                  setSearching(false)
+                  setViewingCard(null)
+                }}
               />
             )}
           </div>
         </>
+      )}
+
+      {replacingOracleId && (
+        <ReplaceCardModal
+          sourceOracleId={replacingOracleId}
+          consideringOracleIds={consideringOracleIds}
+          cardsById={cardsById}
+          onReplace={(newOracleId) => {
+            onReplaceCard(replacingOracleId, newOracleId)
+            setReplacingOracleId(null)
+          }}
+          onClose={() => setReplacingOracleId(null)}
+        />
       )}
     </div>
   )

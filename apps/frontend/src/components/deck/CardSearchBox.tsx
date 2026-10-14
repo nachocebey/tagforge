@@ -1,14 +1,69 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type UIEvent } from 'react'
+import { useDraggable } from '@dnd-kit/core'
 import { trpc } from '../../lib/trpc'
 import { useDebouncedValue } from '../../lib/use-debounced-value'
 import type { CardResult } from '../../lib/trpc-types'
 import { COLOR_DOT, type ColorLetter } from '../../lib/colors'
 import ManaCost from './ManaCost'
-import { CloseIcon } from './icons'
+import { CloseIcon, FlipIcon } from './icons'
+
+// Shares DeckBuildPage's DndContext (this box always renders somewhere
+// inside it) — prefixed so a drop can tell "add this search result to
+// block X" apart from moving an existing deck card, the same way an EDHREC
+// recommendation drag is told apart. A result row has no block to move
+// *from*, real or Considering, until it's dropped somewhere.
+export const SEARCH_RESULT_DRAG_PREFIX = 'searchresult::'
+
+function SearchResultRow({
+  card,
+  isPreview,
+  onHover,
+  onSelect,
+}: {
+  card: CardResult
+  isPreview: boolean
+  onHover: () => void
+  onSelect: () => void
+}) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `${SEARCH_RESULT_DRAG_PREFIX}${card.oracleId}`,
+    data: { oracleId: card.oracleId, card },
+  })
+
+  return (
+    <li>
+      <button
+        ref={setNodeRef}
+        {...listeners}
+        {...attributes}
+        type="button"
+        onMouseEnter={onHover}
+        onClick={onSelect}
+        title="Click to add, or drag onto any block"
+        className={`flex w-full cursor-grab items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition-colors active:cursor-grabbing ${
+          isPreview ? 'bg-forge-surface-hover' : ''
+        } ${isDragging ? 'opacity-40' : ''} text-forge-text hover:bg-forge-surface-hover`}
+      >
+        <span className="min-w-0 flex-1 truncate">{card.name}</span>
+        <span className="flex shrink-0 items-center gap-2">
+          <span className="text-xs text-forge-text-muted">{card.priceUsd ? `$${card.priceUsd}` : '—'}</span>
+          <ManaCost cost={card.manaCost} />
+        </span>
+      </button>
+    </li>
+  )
+}
 
 interface CardSearchBoxProps {
   commanderColorIdentity: ColorLetter[]
   excludeOracleIds: string[]
+  // Shown in the preview pane before any search happens (or once results
+  // clear) — used to open this panel already pointed at a specific card,
+  // e.g. clicking a deck row's "view details" eye icon.
+  previewOnlyCard?: CardResult
+  // The block a selected card will be added to — shown next to the "Add a
+  // card" heading so it's clear which block you're adding into.
+  blockName?: string
   onSelect: (card: CardResult) => void
   onClose: () => void
 }
@@ -25,6 +80,11 @@ const SORT_OPTIONS: { value: SortField; label: string }[] = [
 ]
 
 const TYPE_OPTIONS = ['Creature', 'Instant', 'Sorcery', 'Artifact', 'Enchantment', 'Planeswalker', 'Battle', 'Land']
+// Page size for infinite scroll — more pages load automatically as the
+// user scrolls the results list, rather than hard-capping the total.
+const PAGE_SIZE = 40
+// Within this many px of the bottom, fetch the next page.
+const LOAD_MORE_THRESHOLD_PX = 200
 
 type LegendaryFilter = 'any' | 'legendary' | 'non-legendary'
 const LEGENDARY_OPTIONS: { value: LegendaryFilter; label: string }[] = [
@@ -48,7 +108,17 @@ function sortByColor(cards: CardResult[], direction: SortDirection): CardResult[
 }
 
 function CardPreview({ card, onTagClick }: { card: CardResult; onTagClick: (slug: string) => void }) {
-  const image = card.imageUris?.large ?? card.imageUris?.normal
+  const [faceIndex, setFaceIndex] = useState(0)
+  // Only transform/modal_dfc/flip layouts carry a real second face image —
+  // split/adventure cards' faces exist but share one combined card-level
+  // image, so they're excluded via the "every face has its own image" check.
+  const faces = card.cardFaces
+  const isFlippable = Boolean(faces && faces.length >= 2 && faces.every((f) => f.image_uris))
+  const activeFace = isFlippable ? faces![faceIndex % faces!.length] : null
+  const image = activeFace
+    ? (activeFace.image_uris!.large ?? activeFace.image_uris!.normal)
+    : (card.imageUris?.large ?? card.imageUris?.normal)
+
   const tags = trpc.card.tags.useQuery({ oracleId: card.oracleId })
   const legalFormats = Object.entries(card.legalities)
     .filter(([, status]) => status === 'legal')
@@ -57,7 +127,21 @@ function CardPreview({ card, onTagClick }: { card: CardResult; onTagClick: (slug
   return (
     <div className="flex flex-col gap-4">
       {image ? (
-        <img src={image} alt={card.name} className="w-full rounded-lg border border-forge-border" />
+        <div className="relative">
+          <img src={image} alt={activeFace?.name ?? card.name} className="w-full rounded-lg border border-forge-border" />
+          {isFlippable && (
+            <button
+              type="button"
+              onClick={() => setFaceIndex((i) => i + 1)}
+              title="Flip to the other face"
+              aria-label="Flip to the other face"
+              className="absolute bottom-2 right-2 flex items-center gap-1.5 rounded-full border border-forge-border bg-forge-bg/90 px-3 py-1.5 text-xs text-forge-text shadow-[0_4px_16px_rgba(0,0,0,0.6)] hover:border-forge-ember hover:text-forge-ember"
+            >
+              <FlipIcon className="h-3.5 w-3.5" />
+              Flip
+            </button>
+          )}
+        </div>
       ) : (
         <div className="flex aspect-[5/7] w-full items-center justify-center border border-forge-border bg-forge-bg text-xs text-forge-text-muted">
           No image
@@ -89,7 +173,7 @@ function CardPreview({ card, onTagClick }: { card: CardResult; onTagClick: (slug
               key={tag.id}
               type="button"
               onClick={() => onTagClick(tag.slug)}
-              title={`Search cards tagged ${tag.label}`}
+              title={tag.description ?? `Search cards tagged ${tag.label}`}
               className="border border-forge-ember/40 px-2 py-0.5 text-[11px] text-forge-ember transition-colors hover:border-forge-ember hover:bg-forge-ember/10"
             >
               {tag.label}
@@ -104,6 +188,8 @@ function CardPreview({ card, onTagClick }: { card: CardResult; onTagClick: (slug
 export default function CardSearchBox({
   commanderColorIdentity,
   excludeOracleIds,
+  previewOnlyCard,
+  blockName,
   onSelect,
   onClose,
 }: CardSearchBoxProps) {
@@ -117,6 +203,32 @@ export default function CardSearchBox({
   const [sortField, setSortField] = useState<SortField>('name')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const debouncedText = useDebouncedValue(text, 250)
+  const debouncedTagDraft = useDebouncedValue(tagDraft, 600)
+  const resultsListRef = useRef<HTMLUListElement>(null)
+
+  // Document-level, not a per-input onKeyDown, so Escape closes the panel
+  // no matter which control inside it currently has focus.
+  useEffect(() => {
+    function handleKeyDown(e: globalThis.KeyboardEvent) {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [onClose])
+
+  // Tab from the name input normally lands on the tag/type/color/sort
+  // controls first — jump straight to the first result instead, so typing
+  // a name and hitting Tab gets you into the list to arrow/Enter through
+  // it. Only forward Tab (not Shift+Tab) and only when there's something
+  // to jump to; otherwise Tab behaves normally.
+  function handleNameKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key !== 'Tab' || e.shiftKey) return
+    const firstResult = resultsListRef.current?.querySelector('button')
+    if (firstResult instanceof HTMLElement) {
+      e.preventDefault()
+      firstResult.focus()
+    }
+  }
 
   function addTagChip(tag: string) {
     // Defensive strip: a pasted/typed "tag:removal" still works as just "removal".
@@ -129,6 +241,15 @@ export default function CardSearchBox({
   function removeTagChip(tag: string) {
     setTagChips((prev) => prev.filter((t) => t !== tag))
   }
+
+  // Auto-commits the tag draft into a chip once the user pauses typing —
+  // Enter still works for an immediate commit, this just removes the need
+  // for it. addTagChip already clears the draft, so the effect goes quiet
+  // again once debouncedTagDraft catches up to the now-empty value.
+  useEffect(() => {
+    if (debouncedTagDraft.trim()) addTagChip(debouncedTagDraft)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedTagDraft])
 
   // Type/color filters and tag chips are just additional clauses appended
   // to the same Scryfall-like query string the box already sends — no
@@ -147,27 +268,40 @@ export default function CardSearchBox({
     .filter(Boolean)
     .join(' ')
 
-  const search = trpc.card.search.useQuery(
+  const search = trpc.card.search.useInfiniteQuery(
     {
       query: composedQuery,
       commanderColorIdentity,
       excludeOracleIds,
-      limit: 40,
+      limit: PAGE_SIZE,
       sort: sortField === 'color' ? 'name' : sortField,
-      direction: sortDirection,
+      sortDirection,
     },
-    { enabled: composedQuery.trim().length > 0 },
+    {
+      enabled: composedQuery.trim().length > 0,
+      getNextPageParam: (lastPage) => lastPage.nextCursor,
+    },
   )
 
-  const results = useMemo(() => {
-    if (!search.data) return search.data
-    return sortField === 'color' ? sortByColor(search.data, sortDirection) : search.data
-  }, [search.data, sortField, sortDirection])
+  const flatResults = useMemo(() => search.data?.pages.flatMap((page) => page.items), [search.data])
 
-  const previewCard = results?.find((c) => c.oracleId === hoveredId) ?? results?.[0] ?? null
+  const results = useMemo(() => {
+    if (!flatResults) return flatResults
+    return sortField === 'color' ? sortByColor(flatResults, sortDirection) : flatResults
+  }, [flatResults, sortField, sortDirection])
+
+  const previewCard = results?.find((c) => c.oracleId === hoveredId) ?? results?.[0] ?? previewOnlyCard ?? null
 
   function toggleColor(letter: ColorLetter) {
     setColorFilter((prev) => (prev.includes(letter) ? prev.filter((c) => c !== letter) : [...prev, letter]))
+  }
+
+  function handleResultsScroll(e: UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget
+    const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - LOAD_MORE_THRESHOLD_PX
+    if (nearBottom && search.hasNextPage && !search.isFetchingNextPage) {
+      search.fetchNextPage()
+    }
   }
 
   return (
@@ -176,7 +310,7 @@ export default function CardSearchBox({
       <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-4xl border-l border-forge-border bg-forge-surface shadow-[0_0_60px_rgba(0,0,0,0.6)]">
         <div className="no-scrollbar hidden flex-1 overflow-y-auto p-5 sm:block">
           {previewCard ? (
-            <CardPreview card={previewCard} onTagClick={addTagChip} />
+            <CardPreview key={previewCard.oracleId} card={previewCard} onTagClick={addTagChip} />
           ) : (
             <p className="text-sm text-forge-text-muted">Hover a result to preview it here.</p>
           )}
@@ -185,7 +319,14 @@ export default function CardSearchBox({
         <div className="flex w-full max-w-sm flex-col border-l border-forge-border">
           <div className="border-b border-forge-border p-4">
             <div className="flex items-center justify-between">
-              <p className="font-display text-lg uppercase tracking-wide text-forge-text">Add a card</p>
+              <p className="flex items-center gap-2 font-display text-lg uppercase tracking-wide text-forge-text">
+                Add a card
+                {blockName && (
+                  <span className="rounded-full border border-forge-ember/50 bg-forge-ember/10 px-2 py-0.5 text-xs font-normal normal-case tracking-normal text-forge-ember">
+                    {blockName}
+                  </span>
+                )}
+              </p>
               <button type="button" onClick={onClose} aria-label="Close" className="text-forge-text-muted hover:text-forge-ember">
                 <CloseIcon />
               </button>
@@ -196,6 +337,7 @@ export default function CardSearchBox({
               placeholder="Card name..."
               value={text}
               onChange={(e) => setText(e.target.value)}
+              onKeyDown={handleNameKeyDown}
               className="mt-3 w-full border border-forge-border bg-forge-bg px-3 py-2 text-sm text-forge-text outline-none focus:border-forge-ember"
             />
 
@@ -313,34 +455,26 @@ export default function CardSearchBox({
             </div>
           </div>
 
-          <div className="no-scrollbar flex-1 overflow-y-auto">
+          <div className="no-scrollbar flex-1 overflow-y-auto" onScroll={handleResultsScroll}>
             {composedQuery.trim().length === 0 && (
               <p className="px-4 py-6 text-sm text-forge-text-muted">Start typing, or pick a type/color, to search.</p>
             )}
             {search.isLoading && <p className="px-4 py-6 text-sm text-forge-text-muted">Searching...</p>}
             {results?.length === 0 && <p className="px-4 py-6 text-sm text-forge-text-muted">No matches.</p>}
-            <ul className="divide-y divide-forge-border">
+            <ul ref={resultsListRef} className="divide-y divide-forge-border">
               {results?.map((card) => (
-                <li key={card.oracleId}>
-                  <button
-                    type="button"
-                    onMouseEnter={() => setHoveredId(card.oracleId)}
-                    onClick={() => onSelect(card)}
-                    className={`flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-sm transition-colors ${
-                      previewCard?.oracleId === card.oracleId ? 'bg-forge-surface-hover' : ''
-                    } text-forge-text hover:bg-forge-surface-hover`}
-                  >
-                    <span className="flex min-w-0 items-baseline gap-2">
-                      <span className="truncate">{card.name}</span>
-                      <span className="shrink-0 text-xs text-forge-text-muted">
-                        {card.priceUsd ? `$${card.priceUsd}` : '—'}
-                      </span>
-                    </span>
-                    <ManaCost cost={card.manaCost} />
-                  </button>
-                </li>
+                <SearchResultRow
+                  key={card.oracleId}
+                  card={card}
+                  isPreview={previewCard?.oracleId === card.oracleId}
+                  onHover={() => setHoveredId(card.oracleId)}
+                  onSelect={() => onSelect(card)}
+                />
               ))}
             </ul>
+            {search.isFetchingNextPage && (
+              <p className="px-4 py-3 text-center text-xs text-forge-text-muted">Loading more...</p>
+            )}
           </div>
         </div>
       </div>

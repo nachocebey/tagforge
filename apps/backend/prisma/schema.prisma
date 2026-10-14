@@ -74,6 +74,12 @@ model Card {
   oracleText        String?
   colors            String[]
   colorIdentity     String[]
+  // Colors this card can add to mana pools — lands, mana rocks, dorks, etc.
+  // Absent (empty array) for anything that doesn't produce mana at all, per
+  // Scryfall's own `produced_mana` (verified live: present and correct on
+  // Command Tower, Forest, Birds of Paradise, Sol Ring; absent on Lightning
+  // Bolt). Powers the mana-base panel's "sources per color" side.
+  producedMana      String[] @default([])
   layout            String
   releasedAt        DateTime
   imageUris         Json?

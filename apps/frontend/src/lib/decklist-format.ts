@@ -1,4 +1,4 @@
-import { CONSIDERING_BLOCK_ID } from './considering'
+import { CONSIDERING_BLOCK_ID, CONSIDERING_BLOCK_NAME } from './considering'
 import type { CardResult, DeckBlock } from './trpc-types'
 
 // Double-faced cards are stored under their combined "Front // Back" name;
@@ -25,20 +25,28 @@ export interface ExportOptions {
   // the deck) — this adds it back as its own "Considering" section,
   // regardless of withTags, so it's never silently merged into the deck.
   includeConsidering: boolean
+  // Off by default (a prior version always included it, unconditionally,
+  // which the user explicitly asked to stop doing) — when on, adds the
+  // commander(s) as the first line(s) of the export. No "Commander" header
+  // of its own, just the card line(s) — the deck's own sections already
+  // start with a blank-line separator, so this reads as its own group.
+  includeCommander: boolean
 }
 
-// Plain-text, Moxfield-compatible: a "Commander" section, then either one
-// section per block or a single flattened "Deck" section, blank-line
-// separated, "<qty> <name>" per line.
+// Plain-text, Moxfield-compatible: either one section per block or a
+// single flattened "Deck" section, blank-line separated, "<qty> <name>"
+// per line.
 export function formatDecklist(
-  deckName: string,
-  commanders: CardResult[],
   blocks: DeckBlock[],
   cardsById: Map<string, CardResult>,
+  commanders: CardResult[],
   options: ExportOptions,
 ): string {
-  const lines: string[] = [`// ${deckName}`, '', 'Commander']
-  for (const c of commanders) lines.push(`1 ${displayName(c)}`)
+  const lines: string[] = []
+
+  if (options.includeCommander) {
+    for (const commander of commanders) lines.push(`1 ${displayName(commander)}`)
+  }
 
   const normalBlocks = blocks.filter((b) => b.id !== CONSIDERING_BLOCK_ID)
   const consideringBlock = blocks.find((b) => b.id === CONSIDERING_BLOCK_ID)
@@ -46,21 +54,21 @@ export function formatDecklist(
   if (options.withTags) {
     for (const block of normalBlocks) {
       if (block.cardOracleIds.length === 0) continue
-      lines.push('', block.name)
+      if (lines.length > 0) lines.push('')
+      lines.push(block.name)
       pushCardLines(lines, block.cardOracleIds, cardsById)
     }
   } else {
-    // No header — just a blank line separating it from Commander, then the
-    // flattened list directly.
     const allIds = normalBlocks.flatMap((b) => b.cardOracleIds)
     if (allIds.length > 0) {
-      lines.push('')
+      if (lines.length > 0) lines.push('')
       pushCardLines(lines, allIds, cardsById)
     }
   }
 
   if (options.includeConsidering && consideringBlock && consideringBlock.cardOracleIds.length > 0) {
-    lines.push('', 'Considering')
+    if (lines.length > 0) lines.push('')
+    lines.push(CONSIDERING_BLOCK_NAME)
     pushCardLines(lines, consideringBlock.cardOracleIds, cardsById)
   }
 

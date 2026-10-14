@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react'
 import { hypergeometricAtLeast, hypergeometricBuckets } from '../../lib/hypergeometric'
 import { HAND_CATEGORIES, DEFAULT_THRESHOLD, classifyCard, type HandCategory } from '../../lib/hand-categories'
 import { TrashIcon } from './icons'
+import HoverCardPreview from './HoverCardPreview'
+import CollapsiblePanel from './CollapsiblePanel'
 import type { CardResult } from '../../lib/trpc-types'
 
 const HAND_SIZES = [7, 6, 5] as const
@@ -11,6 +13,55 @@ interface HandProbabilityRowProps {
   // Forests counts 5 toward Lands) — commander(s) and Considering excluded.
   deckOracleIds: string[]
   cardsById: Map<string, CardResult>
+}
+
+// Lets the user add a card that's already in the deck to this category —
+// not a full card search, just a name filter over the deck's own cards
+// (a category is a classification of what's already in the 99, not a way
+// to add new cards to the deck).
+function AddCardToCategory({
+  category,
+  candidates,
+  onAdd,
+}: {
+  category: HandCategory
+  candidates: CardResult[]
+  onAdd: (oracleId: string) => void
+}) {
+  const [query, setQuery] = useState('')
+  const trimmed = query.trim().toLowerCase()
+  const matches = trimmed
+    ? candidates.filter((c) => c.name.toLowerCase().includes(trimmed)).slice(0, 8)
+    : []
+
+  return (
+    <div className="relative mt-2">
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder={`Add a deck card to ${category}...`}
+        className="w-full border border-forge-border bg-forge-bg px-2 py-1 text-[11px] text-forge-text outline-none focus:border-forge-ember"
+      />
+      {matches.length > 0 && (
+        <div className="absolute inset-x-0 top-full z-20 mt-1 max-h-40 overflow-y-auto border border-forge-border bg-forge-surface shadow-[0_8px_30px_rgba(0,0,0,0.5)]">
+          {matches.map((card) => (
+            <button
+              key={card.oracleId}
+              type="button"
+              onClick={() => {
+                onAdd(card.oracleId)
+                setQuery('')
+              }}
+              className="block w-full truncate px-2 py-1.5 text-left text-xs text-forge-text hover:bg-forge-surface-hover"
+            >
+              {card.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 // Self-contained: owns its own hand-size and category-override state,
@@ -48,6 +99,20 @@ export default function HandProbabilityRow({ deckOracleIds, cardsById }: HandPro
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deckOracleIds, cardsById, overrides])
 
+  // Every distinct card actually in the deck, resolved — the universe the
+  // "add card to category" search picks from.
+  const uniqueDeckCards = useMemo(() => {
+    const seen = new Set<string>()
+    const cards: CardResult[] = []
+    for (const oracleId of deckOracleIds) {
+      if (seen.has(oracleId)) continue
+      seen.add(oracleId)
+      const card = cardsById.get(oracleId)
+      if (card) cards.push(card)
+    }
+    return cards.sort((a, b) => a.name.localeCompare(b.name))
+  }, [deckOracleIds, cardsById])
+
   if (deckSize === 0) return null
 
   function setOverride(oracleId: string, category: HandCategory) {
@@ -55,11 +120,10 @@ export default function HandProbabilityRow({ deckOracleIds, cardsById }: HandPro
   }
 
   return (
-    <div className="mt-6">
-      <div className="mb-2 flex items-center justify-between">
-        <p className="text-xs uppercase tracking-wide text-forge-text-muted">Opening hand probability</p>
+    <CollapsiblePanel title="Opening Hand" subtitle="chance of drawing each category, by hand size">
+      <div className="flex items-center justify-between gap-2 border-b border-forge-border px-3 py-2">
+        <span className="text-xs uppercase tracking-wide text-forge-text-muted">Hand size</span>
         <div className="flex items-center gap-1">
-          <span className="mr-1 text-xs text-forge-text-muted">Hand size</span>
           {HAND_SIZES.map((size) => (
             <button
               key={size}
@@ -77,7 +141,7 @@ export default function HandProbabilityRow({ deckOracleIds, cardsById }: HandPro
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-wrap gap-3 p-3">
         {HAND_CATEGORIES.map((category) => {
           const count = counts.get(category) ?? 0
           const threshold = DEFAULT_THRESHOLD[category] ?? 1
@@ -85,7 +149,7 @@ export default function HandProbabilityRow({ deckOracleIds, cardsById }: HandPro
           const isExpanded = expanded === category
 
           return (
-            <div key={category} className="w-48 border border-forge-border bg-forge-surface">
+            <div key={category} className="w-64 border border-forge-border bg-forge-surface">
               <button
                 type="button"
                 onClick={() => setExpanded(isExpanded ? null : category)}
@@ -118,7 +182,9 @@ export default function HandProbabilityRow({ deckOracleIds, cardsById }: HandPro
                         const card = cardsById.get(oracleId)
                         return (
                           <div key={oracleId} className="flex items-center justify-between gap-2">
-                            <span className="truncate text-xs text-forge-text">{card?.name ?? oracleId}</span>
+                            <HoverCardPreview image={card?.imageUris?.normal} oracleId={oracleId}>
+                              <span className="truncate text-xs text-forge-text">{card?.name ?? oracleId}</span>
+                            </HoverCardPreview>
                             <div className="flex shrink-0 items-center gap-1">
                               <select
                                 value={category}
@@ -146,12 +212,18 @@ export default function HandProbabilityRow({ deckOracleIds, cardsById }: HandPro
                       })}
                     </div>
                   )}
+
+                  <AddCardToCategory
+                    category={category}
+                    candidates={uniqueDeckCards.filter((c) => !membersByCategory.get(category)?.includes(c.oracleId))}
+                    onAdd={(oracleId) => setOverride(oracleId, category)}
+                  />
                 </div>
               )}
             </div>
           )
         })}
       </div>
-    </div>
+    </CollapsiblePanel>
   )
 }

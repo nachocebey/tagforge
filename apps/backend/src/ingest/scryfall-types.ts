@@ -22,6 +22,7 @@ export interface ScryfallCard {
   type_line: string
   color_identity: string[]
   colors?: string[]
+  produced_mana?: string[]
   mana_cost?: string
   oracle_text?: string
   image_uris?: Record<string, string>
